@@ -1,0 +1,15 @@
+# 任何构建上下文都不得包含真实秘密或仓库元数据
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+
+frontend/node_modules
+frontend/dist
+backend/bin
+
+uploads
+data
+
+**/*.md

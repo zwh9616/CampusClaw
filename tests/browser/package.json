@@ -1,0 +1,10 @@
+{
+  "name": "campusclaw-browser-acceptance",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser end-to-end checks WE01-WE05 and AC23 against the running stack, driven over CDP with no dependencies.",
+  "scripts": {
+    "check": "node check.mjs"
+  }
+}

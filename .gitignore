@@ -1,0 +1,22 @@
+# 真实秘密：仅模板可入库
+.env
+.env.*
+!.env.example
+
+# 前端与浏览器测试的依赖
+node_modules/
+frontend/dist/
+
+# Go 构建产物
+backend/bin/
+*.test
+
+# 本地运行时数据
+uploads/
+data/
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,4 +1,4 @@
-// Package seed creates the two classes and three accounts the application
+// Package seed creates the two classes and four accounts the application
 // starts from. It is idempotent: re-running never rewrites an existing account
 // and never touches teaching material.
 package seed
@@ -49,6 +49,7 @@ func Run(ctx context.Context, db *sql.DB, cfg *config.Config) (Result, error) {
 	accounts := []account{
 		{username: "teacher_a", role: roleTeacher, class: classAName, password: cfg.Seed.TeacherAPassword},
 		{username: "student_a1", role: roleStudent, class: classAName, password: cfg.Seed.StudentA1Password},
+		{username: "teacher_b", role: roleTeacher, class: classBName, password: cfg.Seed.TeacherBPassword},
 		{username: "student_b1", role: roleStudent, class: classBName, password: cfg.Seed.StudentB1Password},
 	}
 

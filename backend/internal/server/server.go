@@ -66,7 +66,7 @@ func New(cfg *config.Config, handle *sql.DB, opts ...Option) http.Handler {
 	// SameOrigin is layered *inside* the authentication middleware. Middleware
 	// wraps outwards, so the innermost wrapper runs last: this ordering is what
 	// guarantees "no session -> 401" is answered before "cross-origin -> 403".
-	sameOrigin := auth.SameOrigin(cfg.PublicOrigin)
+	sameOrigin := auth.SameOrigin(cfg.PublicOrigin, cfg.DevPublicOrigin)
 
 	routes := []httpapi.Route{
 		{

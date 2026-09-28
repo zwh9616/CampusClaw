@@ -74,6 +74,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	// bcrypt's window is never handed to the hasher and simply fails login.
 	password := []byte(request.Password)
 	if len(password) > config.MaxPasswordBytes {
+		log.Printf("auth: login rejected reason=password_too_long")
 		httpx.WriteError(w, http.StatusUnauthorized, httpx.CodeUnauthorized)
 		return
 	}
@@ -84,6 +85,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		// Burn an equivalent comparison so response time does not disclose
 		// whether the username exists.
 		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), password)
+		log.Printf("auth: login rejected reason=unknown_account")
 		httpx.WriteError(w, http.StatusUnauthorized, httpx.CodeUnauthorized)
 		return
 	case err != nil:
@@ -93,6 +95,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), password); err != nil {
+		log.Printf("auth: login rejected reason=bad_password")
 		httpx.WriteError(w, http.StatusUnauthorized, httpx.CodeUnauthorized)
 		return
 	}

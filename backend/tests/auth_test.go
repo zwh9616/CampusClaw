@@ -86,6 +86,7 @@ func TestLoginSucceedsForSeededAccounts(t *testing.T) {
 	}{
 		"teacher_a":  {role: "teacher", className: "Class A"},
 		"student_a1": {role: "student", className: "Class A"},
+		"teacher_b":  {role: "teacher", className: "Class B"},
 		"student_b1": {role: "student", className: "Class B"},
 	}
 
@@ -167,15 +168,15 @@ func TestLoginRejectsMalformedBodies(t *testing.T) {
 	env.Seed(t)
 
 	cases := map[string]string{
-		"not json":            `{`,
-		"empty body":          ``,
-		"array":               `[]`,
-		"missing password":    `{"username":"teacher_a"}`,
-		"missing username":    `{"password":"x"}`,
-		"empty username":      `{"username":"","password":"x"}`,
-		"empty password":      `{"username":"teacher_a","password":""}`,
-		"trailing value":      `{"username":"teacher_a","password":"x"}{}`,
-		"wrong field types":   `{"username":123,"password":true}`,
+		"not json":          `{`,
+		"empty body":        ``,
+		"array":             `[]`,
+		"missing password":  `{"username":"teacher_a"}`,
+		"missing username":  `{"password":"x"}`,
+		"empty username":    `{"username":"","password":"x"}`,
+		"empty password":    `{"username":"teacher_a","password":""}`,
+		"trailing value":    `{"username":"teacher_a","password":"x"}{}`,
+		"wrong field types": `{"username":123,"password":true}`,
 	}
 
 	for name, body := range cases {

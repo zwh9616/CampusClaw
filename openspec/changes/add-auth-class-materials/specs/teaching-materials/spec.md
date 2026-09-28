@@ -47,6 +47,11 @@ POST /api/materials MUST 接受 multipart/form-data 的 title 和唯一 file，�
 - **WHEN** 上传合法 .md 并在表单/query 中提交 Class B 的 class_id、Student B1 的 uploaded_by
 - **THEN** 返回 201，但材料、知识条目、磁盘目录均属于 Class A，uploaded_by=Teacher A，Class B 无新增记录
 
+#### Scenario: AC30 Class B teacher uploads for own class
+- **GIVEN** Teacher B 以 teacher_b 的 Class B Session 登录，Student B1 和 Student A1 分别有各自班级的 Session
+- **WHEN** Teacher B 上传合法 .md 材料；两名学生分别请求列表、该材料详情与原文件下载
+- **THEN** 上传返回 201，materials、knowledge_entries 和私有文件均归属 Class B，uploaded_by=Teacher B；Student B1 可列出、查看和下载且下载字节与原文件一致；Student A1 列表不可见、详情和下载均返回相同的 404 not_found
+
 #### Scenario: MA01 Text and size validation
 - **GIVEN** Teacher A 的 Session
 - **WHEN** 分别上传 .txt 包装的二进制、无效 UTF-8、NUL、空文件、超过 5 MiB 文件，或缺失 title/file、多个 file

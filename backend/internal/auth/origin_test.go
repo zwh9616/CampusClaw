@@ -219,9 +219,9 @@ func TestRequireTeacherGatesByRole(t *testing.T) {
 		have bool
 		want int
 	}{
-		"no identity": {user: User{}, have: false, want: http.StatusUnauthorized},
-		"teacher":     {user: User{Role: RoleTeacher}, have: true, want: http.StatusCreated},
-		"student":     {user: User{Role: RoleStudent}, have: true, want: http.StatusForbidden},
+		"no identity":  {user: User{}, have: false, want: http.StatusUnauthorized},
+		"teacher":      {user: User{Role: RoleTeacher}, have: true, want: http.StatusCreated},
+		"student":      {user: User{Role: RoleStudent}, have: true, want: http.StatusForbidden},
 		"unknown role": {user: User{Role: "admin"}, have: true, want: http.StatusForbidden},
 	}
 
@@ -238,6 +238,29 @@ func TestRequireTeacherGatesByRole(t *testing.T) {
 
 		if recorder.Code != testCase.want {
 			t.Errorf("%s: status = %d, want %d", name, recorder.Code, testCase.want)
+		}
+	}
+}
+
+// AC32: enabling local Vite adds only that exact source; foreign origins stay forbidden.
+func TestSameOriginWithLocalViteSource(t *testing.T) {
+	publicOrigin, _ := url.Parse("http://localhost:8080")
+	devOrigin, _ := url.Parse("http://localhost:5173")
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	for origin, want := range map[string]int{
+		"http://localhost:8080": http.StatusCreated,
+		"http://localhost:5173": http.StatusCreated,
+		"http://evil.example":   http.StatusForbidden,
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/api/login", nil)
+		request.Header.Set(headerOrigin, origin)
+		recorder := httptest.NewRecorder()
+		SameOrigin(publicOrigin, devOrigin)(next).ServeHTTP(recorder, request)
+		if recorder.Code != want {
+			t.Errorf("Origin %q: status = %d, want %d", origin, recorder.Code, want)
 		}
 	}
 }

@@ -48,8 +48,10 @@ cp .env.example .env
 | `MYSQL_ROOT_PASSWORD` | 仅 db 容器初始化使用，API 不读取 |
 | `SEED_TEACHER_A_PASSWORD` | 必填，1..72 UTF-8 字节 |
 | `SEED_STUDENT_A1_PASSWORD` | 必填，1..72 UTF-8 字节 |
+| `SEED_TEACHER_B_PASSWORD` | 必填，1..72 UTF-8 字节 |
 | `SEED_STUDENT_B1_PASSWORD` | 必填，1..72 UTF-8 字节 |
 | `PUBLIC_ORIGIN` | 浏览器入口来源，例如 `http://localhost:8080`；POST 同源校验的比对基准 |
+| `DEV_PUBLIC_ORIGIN` | 可选；仅本地 HTTP 开发时填写 `http://localhost:5173`，生产保持空值 |
 | `SESSION_COOKIE_SECURE` | 恰好为 `true` 或 `false`；生产 HTTPS 必须为 `true` |
 
 缺少任一必填变量时，`docker compose up` 会直接报出缺少的变量名并停止启动，
@@ -74,10 +76,30 @@ docker compose up --build
 | --- | --- | --- | --- |
 | `teacher_a` | teacher | Class A | `SEED_TEACHER_A_PASSWORD` |
 | `student_a1` | student | Class A | `SEED_STUDENT_A1_PASSWORD` |
+| `teacher_b` | teacher | Class B | `SEED_TEACHER_B_PASSWORD` |
 | `student_b1` | student | Class B | `SEED_STUDENT_B1_PASSWORD` |
 
 初始化是幂等的：重复启动不会重复创建账号、不会重置已存在的密码、不会清理材料。
 若已存在的同名账号角色或班级与预期不符，seed 会报错停止，而不会静默改写。
+### 2.4 本地 Vite 开发
+
+先按 2.1 配置四个种子密码，并设置 `PUBLIC_ORIGIN=http://localhost:8080`、
+`SESSION_COOKIE_SECURE=false`、`DEV_PUBLIC_ORIGIN=http://localhost:5173`，再启动 Compose。
+另开终端运行：
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+浏览器打开 <http://localhost:5173>。Vite 固定使用 5173；`/api/*` 原路径代理到
+Nginx 的 8080 入口，浏览器始终向自己的 5173 来源发送请求。端口被占用时 Vite
+会报错，不会自动换端口。代理保留 `Origin` 等来源头，后端只在上述本地配置下
+额外接受 5173；生产环境必须让 `DEV_PUBLIC_ORIGIN` 保持空值。
+
+登录入口按直接客户端 IP 限制为持续 10 次/分钟、额外突发 5 次；超限返回统一
+JSON 429，并提示稍后重试。账号不存在和密码错误在未超限时仍返回相同的 401。
 
 ---
 
@@ -85,7 +107,7 @@ docker compose up --build
 
 | 方法 | 路径 | 成功 | 主要失败 |
 | --- | --- | --- | --- |
-| POST | `/api/login` | 200 `{user}` + Cookie | 401 凭证错误；400 JSON 非法 |
+| POST | `/api/login` | 200 `{user}` + Cookie | 401 凭证错误；400 JSON 非法；429 登录限流 |
 | POST | `/api/logout` | 204 | 401 未登录（并清 Cookie） |
 | GET | `/api/me` | 200 `User` | 401 |
 | GET | `/api/materials` | 200 `{materials:[]}` | 401 |
@@ -95,7 +117,7 @@ docker compose up --build
 | GET | `/health` | 200 `{"status":"ok"}` | 503 |
 
 错误统一为 `{"error":{"code":"...","message":"..."}}`。`404` 固定 `not_found`，
-跨班与不存在使用完全相同的响应体；`401` 固定 `unauthorized`；`403` 固定 `forbidden`。
+跨班与不存在使用完全相同的响应体；`401` 固定 `unauthorized`；`403` 固定 `forbidden`；登录限流 `429` 固定 `rate_limited`。
 未知 `/api/*` 路径返回 JSON 404，不会回退成 SPA。
 
 `User` 为 `{id,username,role,class_id,class_name}`；
@@ -216,18 +238,19 @@ MSYS_NO_PATHCONV=1 docker run --rm --add-host=host.docker.internal:host-gateway 
   -e ACCEPTANCE_BASE_URL=http://host.docker.internal:8080 \
   -e ACCEPTANCE_TEACHER_A_PASSWORD=... \
   -e ACCEPTANCE_STUDENT_A1_PASSWORD=... \
+  -e ACCEPTANCE_TEACHER_B_PASSWORD=... \
   -e ACCEPTANCE_STUDENT_B1_PASSWORD=... \
   golang:1.25-alpine sh -c "go run ."
 ```
 
-该程序只用标准库，逐个覆盖 AC01–AC15、AC19、AC21、AC25–AC28，输出每个编号的
+该程序只用标准库，逐个覆盖 AC01–AC15、AC19、AC21、AC25–AC31，输出每个编号的
 PASS/FAIL。它从不直接访问 API 容器或数据库，全部走与浏览器相同的 8080 入口与真实
 Cookie，因此同时覆盖认证、班级隔离、解析与网关。
 
 原始的数据库行数断言由 5.3 的 Go 套件在容器网络内完成（AC16–AC18、AC20、DA/MA 场景）；
 本入口通过可观察后果（列表长度不变、详情 404）验证同类事实。
 
-### 5.6 浏览器端到端（WE01–WE05、AC23）
+### 5.6 浏览器端到端（WE01–WE06、AC23/AC32）
 
 需要一个真实浏览器，因此该套件在本机运行。它**没有任何 npm 依赖**：
 `cdp.mjs` 是一个很小的 DevTools 协议客户端，直接驱动 Chromium。
@@ -242,14 +265,19 @@ node check.mjs
 | 变量 | 说明 |
 | --- | --- |
 | `BROWSER_BASE_URL` | 默认 `http://localhost:8080` |
-| `TEACHER_A_PASSWORD` / `STUDENT_A1_PASSWORD` / `STUDENT_B1_PASSWORD` | 必填 |
+| `TEACHER_A_PASSWORD` / `STUDENT_A1_PASSWORD` / `TEACHER_B_PASSWORD` / `STUDENT_B1_PASSWORD` | 必填 |
 | `CHROME_PATH` | 可选；默认使用 Playwright 缓存的 Chromium（`%LOCALAPPDATA%\ms-playwright`） |
 
 若本机没有 Chromium，执行一次 `npx playwright install chromium` 即可（只下载浏览器，
-不安装任何依赖到本项目）。
+不安装任何依赖到本项目）。若缓存的 Chromium 在本机异常退出，可将 `CHROME_PATH` 指向已安装的 Chrome。
+也可按 2.4 启动 Vite，再设置 `BROWSER_BASE_URL=http://localhost:5173` 运行同一脚本；
+此时浏览器验收 AC32 会核对所有业务请求均停留在 5173，外站 `Origin` 仍为 403。
+脚本最后执行 WE06：触发登录 429 并核对页面只显示通用稍后重试提示。
+运行 HTTP 与浏览器套件时请顺序执行；登录限流按客户端 IP 计数，常规登录已按
+7 秒间隔发送，故意触发限流的场景安排在最后。
 
 它驱动的是与用户相同的 8080 入口，并记录浏览器发出的每一个请求，用于断言所有请求
-都只落在该来源上（AC23）。同时验证：刷新后由 `GET /api/me` 恢复登录、错误密码停留在
+都只落在该来源上（8080 模式为 AC23，5173 模式为 AC32）。同时验证：刷新后由 `GET /api/me` 恢复登录、错误密码停留在
 登录页、教师上传后列表刷新、学生看不到上传入口、篡改 `localStorage` 不改变身份、
 材料中的 `<script>` 只按文本显示而不执行、登出后刷新仍未登录。
 
@@ -259,8 +287,10 @@ node check.mjs
 WE02 PASS  未登录进入登录页；错误密码留在登录页；正确凭证进入材料页
 ...
 AC23 PASS  浏览器只访问 localhost:8080 这一个来源
-6 checks, 0 failed
+7 checks, 0 failed
 ```
+
+本次新增场景的逐项执行结果见 [验收记录](tests/evidence/add-auth-class-materials-2026-09-28.md)。
 
 ### 5.7 前端
 
@@ -303,6 +333,7 @@ docker compose start
 - 必须使用 HTTPS，并将 `SESSION_COOKIE_SECURE` 设为 `true`；本地 HTTP 开发才设为 `false`。
 - `PUBLIC_ORIGIN` 必须精确等于浏览器实际访问的来源（含 scheme 与端口，无路径、无末尾斜杠）。
   POST 请求按此校验 `Origin`/`Referer`，不匹配即 403。
+- 生产环境将 `DEV_PUBLIC_ORIGIN` 留空；非本地组合会在 API 启动时被拒绝。
 - 顺序为先认证再校验来源：未登录的跨站 POST 返回 401 而不是 403。
 - 不要为 `/uploads` 增加任何静态映射或反向代理：这些路径必须保持 404。
 - 会话固定 24 小时过期，查询始终校验 `expires_at`。

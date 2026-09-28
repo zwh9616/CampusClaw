@@ -26,9 +26,10 @@ const (
 
 // Config is the fully validated runtime configuration.
 type Config struct {
-	Port         string
-	UploadDir    string
-	PublicOrigin *url.URL
+	Port            string
+	UploadDir       string
+	PublicOrigin    *url.URL
+	DevPublicOrigin *url.URL
 	// SessionCookieSecure must be true wherever the browser reaches the API
 	// over HTTPS; it stays false for local HTTP development.
 	SessionCookieSecure bool
@@ -74,10 +75,11 @@ func (m MySQL) dsn(multiStatements bool) string {
 	)
 }
 
-// Seed holds the initial passwords for the three seeded accounts.
+// Seed holds the initial passwords for the four seeded accounts.
 type Seed struct {
 	TeacherAPassword  string
 	StudentA1Password string
+	TeacherBPassword  string
 	StudentB1Password string
 }
 
@@ -96,6 +98,7 @@ func Load() (*Config, error) {
 		Seed: Seed{
 			TeacherAPassword:  os.Getenv("SEED_TEACHER_A_PASSWORD"),
 			StudentA1Password: os.Getenv("SEED_STUDENT_A1_PASSWORD"),
+			TeacherBPassword:  os.Getenv("SEED_TEACHER_B_PASSWORD"),
 			StudentB1Password: os.Getenv("SEED_STUDENT_B1_PASSWORD"),
 		},
 	}
@@ -110,6 +113,7 @@ func Load() (*Config, error) {
 		"MYSQL_PASSWORD":           cfg.MySQL.Password,
 		"SEED_TEACHER_A_PASSWORD":  cfg.Seed.TeacherAPassword,
 		"SEED_STUDENT_A1_PASSWORD": cfg.Seed.StudentA1Password,
+		"SEED_TEACHER_B_PASSWORD":  cfg.Seed.TeacherBPassword,
 		"SEED_STUDENT_B1_PASSWORD": cfg.Seed.StudentB1Password,
 	})
 
@@ -119,6 +123,7 @@ func Load() (*Config, error) {
 	}{
 		{"SEED_TEACHER_A_PASSWORD", cfg.Seed.TeacherAPassword},
 		{"SEED_STUDENT_A1_PASSWORD", cfg.Seed.StudentA1Password},
+		{"SEED_TEACHER_B_PASSWORD", cfg.Seed.TeacherBPassword},
 		{"SEED_STUDENT_B1_PASSWORD", cfg.Seed.StudentB1Password},
 	} {
 		if err := validatePassword(password.value); err != nil {
@@ -137,6 +142,15 @@ func Load() (*Config, error) {
 		problems = append(problems, err.Error())
 	}
 	cfg.SessionCookieSecure = secure
+
+	if devOrigin := os.Getenv("DEV_PUBLIC_ORIGIN"); devOrigin != "" {
+		if devOrigin != "http://localhost:5173" || cfg.PublicOrigin == nil ||
+			cfg.PublicOrigin.String() != "http://localhost:8080" || cfg.SessionCookieSecure {
+			problems = append(problems, "DEV_PUBLIC_ORIGIN is only allowed for local HTTP development")
+		} else {
+			cfg.DevPublicOrigin, _ = url.Parse(devOrigin)
+		}
+	}
 
 	if len(problems) > 0 {
 		return nil, fmt.Errorf("invalid configuration: %s", strings.Join(problems, "; "))

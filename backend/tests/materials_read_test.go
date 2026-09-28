@@ -3,6 +3,9 @@ package tests
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -306,4 +309,94 @@ func itoa64(value uint64) string {
 		value /= 10
 	}
 	return string(digits)
+}
+
+// AC30: Teacher B writes to Class B, and only Class B can read the original.
+func TestTeacherBUploadsOnlyForClassB(t *testing.T) {
+	env := NewEnv(t)
+	env.Seed(t)
+
+	teacherB := env.Login(t, "teacher_b", env.Password(t, "teacher_b"))
+	original := "Class B original\n"
+	materialID := uploadMarkdown(t, env, teacherB, "Class B lesson", original)
+	classB := env.ClassID(t, "Class B")
+
+	var classID, uploadedBy uint64
+	var storedName string
+	if err := env.DB.QueryRow("SELECT class_id, uploaded_by, stored_filename FROM materials WHERE id = ?", materialID).
+		Scan(&classID, &uploadedBy, &storedName); err != nil {
+		t.Fatalf("read Class B material: %v", err)
+	}
+	if classID != classB || uploadedBy != env.UserID(t, "teacher_b") {
+		t.Errorf("material owner = class %d/user %d, want Class B/Teacher B", classID, uploadedBy)
+	}
+	var knowledgeClass uint64
+	var knowledgeText string
+	if err := env.DB.QueryRow("SELECT class_id, content FROM knowledge_entries WHERE material_id = ?", materialID).
+		Scan(&knowledgeClass, &knowledgeText); err != nil {
+		t.Fatalf("read Class B knowledge: %v", err)
+	}
+	if knowledgeClass != classB || knowledgeText != original {
+		t.Errorf("knowledge owner/content = class %d/%q, want Class B/%q", knowledgeClass, knowledgeText, original)
+	}
+	storedPath := filepath.Join(env.Config.UploadDir, strconv.FormatUint(classB, 10), storedName)
+	data, err := os.ReadFile(storedPath)
+	if err != nil || string(data) != original {
+		t.Errorf("stored original = %q, error %v, want %q", data, err, original)
+	}
+
+	studentB := studentCookie(t, env, "student_b1")
+	bList := env.get(t, "/api/materials", studentB)
+	if bList.Code != http.StatusOK {
+		t.Fatalf("Class B list: status = %d", bList.Code)
+	}
+	var visible listBody
+	if err := json.Unmarshal(bList.Body.Bytes(), &visible); err != nil {
+		t.Fatalf("decode Class B list: %v", err)
+	}
+	found := false
+	for _, material := range visible.Materials {
+		if material.ID == materialID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Student B1 cannot list Teacher B material")
+	}
+	bDetail := env.get(t, "/api/materials/"+materialID, studentB)
+	if bDetail.Code != http.StatusOK {
+		t.Errorf("Class B detail: status = %d", bDetail.Code)
+	} else {
+		var detail detailBody
+		if err := json.Unmarshal(bDetail.Body.Bytes(), &detail); err != nil || detail.Content != original {
+			t.Errorf("Class B detail text = %q, error %v", detail.Content, err)
+		}
+	}
+	bDownload := env.get(t, "/api/materials/"+materialID+"/file", studentB)
+	if bDownload.Code != http.StatusOK || bDownload.Body.String() != original {
+		t.Errorf("Class B download: status = %d, body = %q", bDownload.Code, bDownload.Body.String())
+	}
+
+	studentA := studentCookie(t, env, "student_a1")
+	aList := env.get(t, "/api/materials", studentA)
+	if aList.Code != http.StatusOK {
+		t.Fatalf("Class A list: status = %d", aList.Code)
+	}
+	var hidden listBody
+	if err := json.Unmarshal(aList.Body.Bytes(), &hidden); err != nil {
+		t.Fatalf("decode Class A list: %v", err)
+	}
+	for _, material := range hidden.Materials {
+		if material.ID == materialID {
+			t.Error("Student A1 can list Class B material")
+		}
+	}
+	for _, suffix := range []string{"", "/file"} {
+		forbidden := env.get(t, "/api/materials/"+materialID+suffix, studentA)
+		missing := env.get(t, "/api/materials/999999999999999"+suffix, studentA)
+		if forbidden.Code != http.StatusNotFound || missing.Code != http.StatusNotFound ||
+			forbidden.Body.String() != missing.Body.String() {
+			t.Errorf("Class A cross-class %q response differs from missing material", suffix)
+		}
+	}
 }

@@ -1,7 +1,10 @@
 package tests
 
 import (
+	"bytes"
 	"context"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -86,8 +89,8 @@ func TestSeedCreatesTheAgreedAccounts(t *testing.T) {
 	if result.CreatedClasses != 2 {
 		t.Errorf("created %d classes, want 2", result.CreatedClasses)
 	}
-	if result.CreatedUsers != 3 {
-		t.Errorf("created %d accounts, want 3", result.CreatedUsers)
+	if result.CreatedUsers != 4 {
+		t.Errorf("created %d accounts, want 4", result.CreatedUsers)
 	}
 
 	expected := map[string]struct {
@@ -97,6 +100,7 @@ func TestSeedCreatesTheAgreedAccounts(t *testing.T) {
 	}{
 		"teacher_a":  {role: "teacher", class: "Class A"},
 		"student_a1": {role: "student", class: "Class A"},
+		"teacher_b":  {role: "teacher", class: "Class B"},
 		"student_b1": {role: "student", class: "Class B"},
 	}
 
@@ -127,7 +131,7 @@ func TestSeedHashesPasswordsWithBcryptFromEnvironment(t *testing.T) {
 	env := NewEnv(t)
 	seedOnce(t, env)
 
-	for _, username := range []string{"teacher_a", "student_a1", "student_b1"} {
+	for _, username := range []string{"teacher_a", "student_a1", "teacher_b", "student_b1"} {
 		var hash string
 		if err := env.DB.QueryRow("SELECT password_hash FROM users WHERE username = ?", username).Scan(&hash); err != nil {
 			t.Fatalf("%s: %v", username, err)
@@ -158,16 +162,17 @@ func TestSeedIsIdempotentAndPreservesData(t *testing.T) {
 	env := NewEnv(t)
 	seedOnce(t, env)
 
-	// Material that must survive repeated initialisation.
-	classA := env.ClassID(t, "Class A")
-	teacher := env.UserID(t, "teacher_a")
-	insertMaterial(t, env.DB, classA, teacher, "store-survives")
-
-	if _, err := env.DB.Exec(
-		"INSERT INTO knowledge_entries (class_id, material_id, content) VALUES (?, ?, 'text')",
-		classA, 1,
-	); err != nil {
-		t.Fatalf("insert knowledge entry: %v", err)
+	// Both classes keep their material and original bytes across seed passes.
+	uploadMarkdown(t, env, env.Login(t, "teacher_a", env.Password(t, "teacher_a")), "A stays", "Class A original")
+	uploadMarkdown(t, env, env.Login(t, "teacher_b", env.Password(t, "teacher_b")), "B stays", "Class B original")
+	filesBefore := storedFiles(t, env.Config.UploadDir)
+	bytesBefore := make(map[string][]byte, len(filesBefore))
+	for _, path := range filesBefore {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read original %s: %v", path, err)
+		}
+		bytesBefore[path] = data
 	}
 
 	before := snapshot(t, env)
@@ -199,11 +204,27 @@ func TestSeedIsIdempotentAndPreservesData(t *testing.T) {
 		}
 	}
 
-	// The original credentials must still work.
-	cookie := env.Login(t, "teacher_a", env.Password(t, "teacher_a"))
-	if cookie == nil {
-		t.Error("original credentials no longer work after repeated seeding")
+	filesAfter := storedFiles(t, env.Config.UploadDir)
+	if !reflect.DeepEqual(filesBefore, filesAfter) {
+		t.Errorf("stored originals changed: before %v, after %v", filesBefore, filesAfter)
 	}
+	for _, path := range filesBefore {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("read original after seed %s: %v", path, err)
+			continue
+		}
+		if !bytes.Equal(data, bytesBefore[path]) {
+			t.Errorf("original %s changed across seeds", path)
+		}
+	}
+
+	for _, username := range []string{"teacher_a", "student_a1", "teacher_b", "student_b1"} {
+		if cookie := env.Login(t, username, env.Password(t, username)); cookie == nil {
+			t.Errorf("%s: original credentials no longer work", username)
+		}
+	}
+
 }
 
 // A pre-existing account that contradicts the expected role or class must stop
@@ -261,5 +282,37 @@ func TestSeedRollsBackWhenItFails(t *testing.T) {
 
 	if after := env.CountRows(t, "classes"); after != classesBefore {
 		t.Errorf("classes = %d, want %d: the transaction rolled back partially", after, classesBefore)
+	}
+}
+
+// A pre-existing Teacher B identity must never be silently reassigned.
+func TestSeedRejectsContradictoryTeacherB(t *testing.T) {
+	for name, setup := range map[string]struct {
+		role  string
+		class string
+	}{
+		"wrong role":  {role: "student", class: "Class B"},
+		"wrong class": {role: "teacher", class: "Class A"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := NewEnv(t)
+			classID := insertClass(t, env.DB, setup.class)
+			insertUser(t, env.DB, "teacher_b", setup.role, classID)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := seed.Run(ctx, env.DB, env.Config); err == nil {
+				t.Fatal("seed accepted contradictory teacher_b identity")
+			}
+
+			var role, className string
+			err := env.DB.QueryRow(`SELECT u.role, c.name FROM users u JOIN classes c ON c.id = u.class_id WHERE u.username = 'teacher_b'`).Scan(&role, &className)
+			if err != nil {
+				t.Fatalf("read teacher_b after failed seed: %v", err)
+			}
+			if role != setup.role || className != setup.class {
+				t.Errorf("teacher_b changed to %s/%s, want %s/%s", role, className, setup.role, setup.class)
+			}
+		})
 	}
 }

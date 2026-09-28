@@ -25,13 +25,19 @@ Browser --http://localhost:8080--> web (Nginx :80)
 
 Compose 仅 web 声明 ports: 8080:80；api/db 无 ports。api 通过服务名 db 访问数据库；Nginx 通过 api:8081 原样转发路径。web 不挂载 uploads 卷。db_data 和 uploads 两个命名卷持久化。数据库健康后 API 执行迁移和 seed，完成后提供服务；web 等待 API 健康。/health 以 2 秒超时 Ping 数据库，准备就绪返回 200 {"status":"ok"}，不可用返回 503 通用错误，绝不输出连接秘密。
 
+本机前端开发单独运行 Vite，固定 host=localhost、port=5173、strictPort=true；server.proxy 将 /api/* 原路径转到 http://localhost:8080，由既有 Nginx 再代理 Go。Vite 代理保留浏览器的 Origin、Referer、Sec-Fetch-Site，不把外站来源改写为允许来源；浏览器仍只访问自身 5173 来源的 /api/*，Cookie 保持同源。Compose 可在明确启用本地开发时把 DEV_PUBLIC_ORIGIN 传给 API，正常部署仍只有 web 发布 8080。
+
 ### D2 信任边界与身份
 
 浏览器输入、query/path/body、Cookie 中的任何身份声明都不可信。唯一 Cookie 为 campusclaw_session，值为 crypto/rand 生成的 32 随机字节经 base64url 编码；不是自增值，不携带 user_id/role/class_id。sessions.session_id MUST 仅保存对 Cookie token 字符串原始 ASCII 字节计算的 SHA-256 摘要，以 64 个小写十六进制字符编码并唯一索引；数据库 MUST NOT 保存原始 token；请求时对 token 求摘要查 sessions，JOIN users，检查 expires_at 后形成服务端当前用户。摘要仍对应不可预测的 Session，数据库 id 不对外使用。
 
 每次请求从 users 读取最新 role/class_id，禁用客户端 role/class_id、JWT 或 signed-cookie 身份授权。Session 固定 24 小时过期，登录生成新 token 并撤销浏览器旧 token 对应 Session，登出删除当前 Session。Cookie 固定 HttpOnly、SameSite=Lax、Path=/、Max-Age=86400，不设置 Domain；本地 HTTP Secure=false，生产 HTTPS 强制 SESSION_COOKIE_SECURE=true。清理 Cookie 使用相同属性、Max-Age=-1 和过去 Expires。响应不返回 token，认证响应及受保护数据设置 Cache-Control: no-store。
 
-POST 路由实施同源检查：提供 Origin 时必须精确匹配 PUBLIC_ORIGIN；缺少 Origin 时若有 Referer 必须同源，Sec-Fetch-Site=cross-site 必须拒绝；Origin 优先，不要求同时提供 Referer，也不在 Origin 失败后回退 Referer。三头均缺失允许正常 Cookie 客户端测试；仅有 Sec-Fetch-Site 时接受 same-origin/none，拒绝其他值。空/非法 Origin 或 Referer 拒绝，Referer 按 scheme/host/有效 port 比较同源。生产 Origin 明确配置 HTTPS，不信任任意 Host/X-Forwarded-*。该检查在受保护路由认证及角色校验之后、业务变更之前执行，失败返回 403，保证无登录 401、学生上传 403 的契约。登录也执行同源检查。Nginx 不开放跨域 CORS。
+POST 路由实施同源检查：提供 Origin 时必须精确匹配当前允许来源（正常运行仅 PUBLIC_ORIGIN）；缺少 Origin 时若有 Referer 必须与允许来源同源，Sec-Fetch-Site=cross-site 必须拒绝；Origin 优先，不要求同时提供 Referer，也不在 Origin 失败后回退 Referer。三头均缺失允许正常 Cookie 客户端测试；仅有 Sec-Fetch-Site 时接受 same-origin/none，拒绝其他值。空/非法 Origin 或 Referer 拒绝，Referer 按 scheme/host/有效 port 比较同源。生产 Origin 明确配置 HTTPS，不信任任意 Host/X-Forwarded-*。该检查在受保护路由认证及角色校验之后、业务变更之前执行，失败返回 403，保证无登录 401、学生上传 403 的契约。登录也执行同源检查。Nginx 不开放跨域 CORS。
+
+DEV_PUBLIC_ORIGIN 默认未启用；仅当 PUBLIC_ORIGIN=http://localhost:8080、SESSION_COOKIE_SECURE=false 且 DEV_PUBLIC_ORIGIN 精确为 http://localhost:5173 时，允许在现有来源之外接受本地 Vite 来源。其他非空组合启动失败，生产 HTTPS 不接受开发来源。来源判定不信任 Host/X-Forwarded-*，不新增 CORS。
+
+Nginx 在 http 上下文使用 $binary_remote_addr 建立共享限流区，在精确 /api/login 位置应用 10r/m、burst=5、nodelay，并保持原路径代理；按直接连接的客户端 IP 统计所有登录请求，不以用户名或 X-Forwarded-* 为键。超限在代理前返回 429 与固定 JSON rate_limited 错误、Cache-Control: no-store，不设置 Cookie。Nginx 记录拒绝事件；Go 为未知账号、错误密码、超长密码记录不含用户名原文和秘密的原因码，客户端仍只见统一 401。限流区随 Nginx 重启清空，不增加业务表。
 
 bcrypt cost=12；未知用户名用固定的非账号 dummy bcrypt hash 做比较以缩小时间差；用户名不存在和密码错均 401 同一错误体。password 按原始字节处理，不截断或 trim；超过 bcrypt 72 字节上限不送入哈希函数，登录统一 401。seed 必填环境变量密码为 1..72 UTF-8 字节，不合规则启动失败；日志不得记录密码、token、DSN 或文件全文。
 
@@ -57,19 +63,20 @@ bcrypt cost=12；未知用户名用固定的非账号 dummy bcrypt hash 做比�
 | --- | --- | --- | --- | --- |
 | Teacher A | teacher_a | Class A | teacher | SEED_TEACHER_A_PASSWORD |
 | Student A1 | student_a1 | Class A | student | SEED_STUDENT_A1_PASSWORD |
+| Teacher B | teacher_b | Class B | teacher | SEED_TEACHER_B_PASSWORD |
 | Student B1 | student_b1 | Class B | student | SEED_STUDENT_B1_PASSWORD |
 
-仅新建用户时生成 bcrypt hash；重复 seed 不重置密码。若预存同名 seed 账号的角色/班级不符则失败报错而非静默改写。密码与 MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD 等只从环境读取；.env 被 gitignore/dockerignore 排除，.env.example 只列空值与说明，无可用密码，前端不得注入任何秘密。
+四个种子账号仅在新建时生成 bcrypt hash；重复 seed 不重置密码，包括新加入的 teacher_b。若预存同名 seed 账号的角色/班级不符则失败报错而非静默改写。缺少 SEED_TEACHER_B_PASSWORD 与缺少其他必填种子密码一样导致启动失败，不使用默认密码。密码与 MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD 等只从环境读取；.env 被 gitignore/dockerignore 排除，.env.example 只列空值与说明，无可用密码，前端不得注入任何秘密。
 
 ### D4 固定 API 契约
 
-JSON 错误统一 {"error":{"code":"...","message":"..."}}，不附资源存在性/SQL/路径。404 固定 not_found，跨班与不存在使用同样查询失败分支、状态码和响应体，不先做全局存在性检查。401 固定 unauthorized；403 固定 forbidden。未知 API 不回 SPA。方法错误 405。详情/下载共用 ID 校验：只接受 ASCII 十进制数字串，解析为 1..18446744073709551615 的 BIGINT UNSIGNED；前导零允许（001 等价 1），非数字、空格、正负号、0、负数、小数、科学计数和溢出均返回相同 404 not_found。先完成认证，故未登录无效 ID 仍 401。
+JSON 错误统一 {"error":{"code":"...","message":"..."}}，不附资源存在性/SQL/路径。404 固定 not_found，跨班与不存在使用同样查询失败分支、状态码和响应体，不先做全局存在性检查。401 固定 unauthorized；403 固定 forbidden；登录限流 429 固定 rate_limited 与通用提示。未知 API 不回 SPA。方法错误 405。详情/下载共用 ID 校验：只接受 ASCII 十进制数字串，解析为 1..18446744073709551615 的 BIGINT UNSIGNED；前导零允许（001 等价 1），非数字、空格、正负号、0、负数、小数、科学计数和溢出均返回相同 404 not_found。先完成认证，故未登录无效 ID 仍 401。
 
 User={id,username,role,class_id,class_name}。Material={id,class_id,uploaded_by,title,original_filename,content_type,created_at}，不返回 stored_filename/磁盘路径。列表按 created_at DESC,id DESC；本迭代不提供搜索或分页参数。
 
 | 方法与路径 | 输入 | 成功响应 | 失败 |
 | --- | --- | --- | --- |
-| POST /api/login | JSON username,password（其他身份字段不用于授权） | 200 {user:User} + Cookie | 凭证错误/未知用户 401；JSON 非法/必填字段缺失 400 |
+| POST /api/login | JSON username,password（其他身份字段不用于授权） | 200 {user:User} + Cookie | 凭证错误/未知用户 401；JSON 非法/必填字段缺失 400；Nginx 限流 429 |
 | POST /api/logout | 当前 Cookie | 204 空体并删除 Session/清 Cookie | 未登录/过期 401 并清 Cookie |
 | GET /api/me | 当前 Cookie | 200 User | 未登录/过期 401 |
 | GET /api/materials | 当前 Cookie | 200 {materials:Material[]} | 未登录 401 |
@@ -117,7 +124,7 @@ Go 负责认证、存储、解析调用和数据库事务，Poppler 仅为 API �
 
 ### D6 React 状态与交互
 
-应用启动唯一身份来源为 GET /api/me。200 恢复 User 并加载材料；401 清内存进入 Login Page；网络/5xx 展示可重试错误，不伪装为未登录。使用相对 /api URL、同源 Cookie；不在 localStorage 存 token 或可信 role/class_id。Login 成功进入 Materials Page，显示 username、role、class_name/class_id、列表、查看/下载与登出。详情在材料页文本面板呈现。
+应用启动唯一身份来源为 GET /api/me。200 恢复 User 并加载材料；401 清内存进入 Login Page；网络/5xx 展示可重试错误，不伪装为未登录。使用相对 /api URL、同源 Cookie；不在 localStorage 存 token 或可信 role/class_id。Login 成功进入 Materials Page，显示 username、role、class_name/class_id、列表、查看/下载与登出。登录收到 429 时显示通用稍后重试提示，不伪装为错误密码或自动反复重试。详情在材料页文本面板呈现。
 
 teacher 显示 title、accept=.md,.txt,.pdf,.docx 文件输入及提交状态，201 后重新请求列表；student 无上传 UI。学生即使手改 UI、localStorage 或直接 API 仍由 Go 拒绝。任何受保护请求 401 则退出当前内存身份；403/404 显示通用错误。登出 204 或已失效 401 均清状态。自动化使用浏览器测试 UI 与同源网络，通过 Cookie jar 直接 HTTP 请求测试服务端安全边界。
 
@@ -132,7 +139,7 @@ teacher 显示 title、accept=.md,.txt,.pdf,.docx 文件输入及提交状态，
 
 ## Migration Plan
 
-1. 完成配置说明，用户复制 .env.example 为未跟踪 .env 并设置数据库与三账号密码；这是秘密配置前提，不需要手动编译、执行 SQL 或创建容器。
+1. 完成配置说明，用户复制 .env.example 为未跟踪 .env 并设置数据库与四账号密码；这是秘密配置前提，不需要手动编译、执行 SQL 或创建容器。
 2. docker compose up --build 启动 db、api、web；迁移与 seed 自动执行，http://localhost:8080 可用，GET /health=200。
 3. 真实 MySQL 集成测试使用独立测试库/卷和运行时临时秘密；通过 Nginx 运行 spec 场景，不改用户业务数据。故障注入仅测试构建/测试连接，不增加生产故障触发 API。
 4. 重启与重复初始化验证账号/班级计数、密码 hash、材料记录及文件保持；正常停止使用 docker compose down，不带 -v。

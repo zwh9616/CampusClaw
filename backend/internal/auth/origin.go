@@ -23,12 +23,17 @@ const (
 // The proxy in front of the API does not enable CORS, so this is a second line
 // of defence specifically against cross-site form posts, which browsers send
 // with cookies attached.
-func SameOrigin(publicOrigin *url.URL) func(http.Handler) http.Handler {
-	allowed := publicOrigin.String()
+func SameOrigin(publicOrigin *url.URL, devPublicOrigin ...*url.URL) func(http.Handler) http.Handler {
+	allowed := []*url.URL{publicOrigin}
+	for _, origin := range devPublicOrigin {
+		if origin != nil {
+			allowed = append(allowed, origin)
+		}
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !isSameOriginRequest(r, allowed, publicOrigin) {
+			if !isSameOriginRequest(r, allowed) {
 				httpx.WriteError(w, http.StatusForbidden, httpx.CodeForbidden)
 				return
 			}
@@ -37,7 +42,7 @@ func SameOrigin(publicOrigin *url.URL) func(http.Handler) http.Handler {
 	}
 }
 
-func isSameOriginRequest(r *http.Request, allowed string, parsed *url.URL) bool {
+func isSameOriginRequest(r *http.Request, allowed []*url.URL) bool {
 	// Sec-Fetch-Site can only ever reject. A cross-site value is refused even
 	// when Origin happens to match, which is what the spec requires.
 	if fetchSite, present := headerValue(r, headerFetchSite); present {
@@ -49,11 +54,21 @@ func isSameOriginRequest(r *http.Request, allowed string, parsed *url.URL) bool 
 	// Origin takes precedence and never falls back to Referer, so a request
 	// carrying a wrong Origin cannot be rescued by a correct one.
 	if origin, present := headerValue(r, headerOrigin); present {
-		return origin == allowed
+		for _, candidate := range allowed {
+			if origin == candidate.String() {
+				return true
+			}
+		}
+		return false
 	}
 
 	if referer, present := headerValue(r, headerReferer); present {
-		return sameOriginURL(referer, parsed)
+		for _, candidate := range allowed {
+			if sameOriginURL(referer, candidate) {
+				return true
+			}
+		}
+		return false
 	}
 
 	// No browser context headers at all: a non-browser API client. The request

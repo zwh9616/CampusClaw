@@ -99,5 +99,24 @@
 | DOCX 段落/表格解析与下载 | AC26 | 5.4、5.5、6.1、9.1 |
 | 损坏/加密/无可提取文本拒绝 | AC27 | 5.3、5.4、5.6、9.1 |
 | 新格式继承全部访问控制 | AC28 | 5.8、6.2、9.1 |
+| B 班教师登录 | AC29 | 11.1、11.2、11.3 |
+| B 班教师上传与双向隔离 | AC30 | 11.2、11.3 |
+| 登录入口按 IP 限流 | AC31 | 12.1、12.2、12.5 |
+| Vite 开发同源代理 | AC32 | 12.3、12.4、12.5 |
 
-补充场景映射：AU01/AU02/AU06 → 3.1–3.3；AU03–AU05 → 3.6；DA01/DA02 → 2.1–2.3、9.2；MA01/MA06 → 5.1；MA02 → 5.2；MA03 → 5.7、9.2；MA04 → 5.8；MA05 → 4.3、6.2；MA07 → 5.9；MA08 → 5.6、9.2；WE01–WE05 → 8.1–8.4、9.4；RU01 → 7.1；RU02 → 7.2。自动孤立文件恢复不在本次任务和验收门槛中。
+补充场景映射：AU01/AU02/AU06 → 3.1–3.3；AU03–AU05 → 3.6；DA01/DA02 → 2.1–2.3、9.2；MA01/MA06 → 5.1；MA02 → 5.2；MA03 → 5.7、9.2；MA04 → 5.8；MA05 → 4.3、6.2；MA07 → 5.9；MA08 → 5.6、9.2；WE01–WE05 → 8.1–8.4、9.4；WE06 → 12.5；RU01 → 7.1；RU02 → 7.2。自动孤立文件恢复不在本次任务和验收门槛中。
+
+## 11. B 班教师种子账号补充（新增工作；1–9 节勾选记录为此前完成状态）
+
+- [x] 11.1 在服务端配置校验、Compose 环境传递及空值 .env.example 中加入必填的 SEED_TEACHER_B_PASSWORD；验证缺失或密码长度不合法时安全失败，仓库和日志均不含真实密码（DATA-02、DA02）。
+- [x] 11.2 在事务 seed 中加入 teacher_b（teacher/Class B），仅新建账号时从 SEED_TEACHER_B_PASSWORD 生成 bcrypt hash；验证重复 seed 不重置四个账号密码、不改角色/班级、不清除 A/B 班材料，预存同名但角色或班级不符时报错（DATA-02、AC20）。
+- [x] 11.3 扩展认证、材料与持久化验收：执行 AC29，确认 teacher_b 登录与 /api/me 的 Class B 身份；执行 AC30，确认 B 班教师上传后 Student B1 可列出/查看/下载、Student A1 无法访问；按四个种子账号重新执行 AC20 和 DA02，保存各场景结果。
+- [x] 11.4 更新 README 的四个种子用户名与新增环境变量说明，并在新增验收完成后记录 AC29/AC30、AC20、DA02 的逐场景结果；全部完成后才勾选本节任务。
+
+## 12. 登录限流与 Vite 本地代理（新增工作；此前勾选记录为已完成范围）
+
+- [x] 12.1 在 Nginx 的 http 上下文按 $binary_remote_addr 建立共享限流区，仅对精确 /api/login 应用 10r/m、burst=5、nodelay；429 返回固定 JSON rate_limited、no-store、无 Set-Cookie，登录请求仍按原路径代理且不信任 X-Forwarded-* 作为限流键（AUTH-06、AC31）。
+- [x] 12.2 为 Go 登录失败增加仅服务端可见的安全原因码日志，区分未知账号、错误密码和超长密码；核对日志不含用户名原文、密码、Token 或请求体，错误密码与未知账号对外继续同体 401（AUTH-01、AUTH-06、AC31）。
+- [x] 12.3 在服务端配置与 Compose 传递中增加默认未启用的 DEV_PUBLIC_ORIGIN；只接受 PUBLIC_ORIGIN=http://localhost:8080、SESSION_COOKIE_SECURE=false、DEV_PUBLIC_ORIGIN=http://localhost:5173 的明确本地组合，其他非空组合启动失败；保留 Origin/Referer/Sec-Fetch-Site 规则，不开放 CORS（AUTH-05、AC32）。
+- [x] 12.4 配置 Vite host=localhost、port=5173、strictPort=true，将 /api/* 原路径代理至 http://localhost:8080；代理保留 Origin、Referer、Sec-Fetch-Site 和 Cookie，不把外站来源改写为可信来源；前端继续使用相对 /api 地址并对登录 429 显示稍后重试提示（RUN-05、WEB-01、WE06）。
+- [x] 12.5 扩展经 Nginx 和 Vite 的独立验收：执行 AC31、AC32、WE06，核对限额内统一 401、超限统一 429 与日志安全，5173 登录/列表/上传/登出、外站 Origin 403、8080 入口照常工作；更新 README 的本地开发步骤、DEV_PUBLIC_ORIGIN 和限流行为，保存逐场景结果后再勾选本节任务。

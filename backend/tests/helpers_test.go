@@ -93,7 +93,7 @@ func NewEnv(t *testing.T) *Env {
 	return &Env{Config: cfg, DB: handle}
 }
 
-// Seed creates the two classes and three accounts.
+// Seed creates the two classes and four accounts.
 func (e *Env) Seed(t *testing.T) {
 	t.Helper()
 
@@ -166,6 +166,8 @@ func (e *Env) Password(t *testing.T, username string) string {
 		return e.Config.Seed.TeacherAPassword
 	case "student_a1":
 		return e.Config.Seed.StudentA1Password
+	case "teacher_b":
+		return e.Config.Seed.TeacherBPassword
 	case "student_b1":
 		return e.Config.Seed.StudentB1Password
 	default:
@@ -247,6 +249,7 @@ func fillMissingSecrets(t *testing.T) {
 	for _, name := range []string{
 		"SEED_TEACHER_A_PASSWORD",
 		"SEED_STUDENT_A1_PASSWORD",
+		"SEED_TEACHER_B_PASSWORD",
 		"SEED_STUDENT_B1_PASSWORD",
 	} {
 		if os.Getenv(name) == "" {

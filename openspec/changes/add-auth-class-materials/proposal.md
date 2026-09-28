@@ -4,11 +4,11 @@ CampusClaw 当前仓库只有 OpenSpec 初始化结构，尚无认证、班级�
 
 ## What Changes
 
-- 建立 React 18 + TypeScript + Vite、Go net/http、MySQL 8、Nginx、Docker Compose 的前后端分离基础；浏览器仅通过 Nginx 的 8080 端口访问。
-- 实现 bcrypt 密码登录、服务端 Session、当前用户查询和登出，仅支持 teacher/student。
+- 建立 React 18 + TypeScript + Vite、Go net/http、MySQL 8、Nginx、Docker Compose 的前后端分离基础；正常 Compose 运行时浏览器仅通过 Nginx 的 8080 端口访问，本地 Vite 开发时由 5173 同源代理 /api/* 到 8080。
+- 实现 bcrypt 密码登录、服务端 Session、当前用户查询和登出，仅支持 teacher/student；公网登录入口按客户端 IP 限流并统一返回安全错误。
 - Go 后端独立实施教师上传权限和基于 Session 用户 class_id 的班级隔离；跨班详情、下载统一 404。
 - 支持 .md/.txt/.pdf/.docx 安全上传、原文件私有存储；提取文本并在同一事务中写入 materials 与 knowledge_entries，提供本班列表、解析文本查看和原文件下载。PDF 仅提取可读取的文本层，DOCX 提取正文段落和表格文本。
-- 提供两班三账号的幂等环境变量 seed、React 登录及材料页面、健康检查和可重复验收。
+- 提供两班四账号的幂等环境变量 seed（Class A 与 Class B 各一名教师和一名学生）、React 登录及材料页面、健康检查和可重复验收。
 
 ## Capabilities
 

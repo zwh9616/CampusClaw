@@ -119,8 +119,9 @@ func TestLogsNeverContainSecrets(t *testing.T) {
 	logged := captured.String()
 
 	secrets := map[string]string{
-		"Teacher A password": env.Password(t, "teacher_a"),
+		"Teacher A password":  env.Password(t, "teacher_a"),
 		"Student A1 password": env.Password(t, "student_a1"),
+		"Teacher B password":  env.Password(t, "teacher_b"),
 		"Student B1 password": env.Password(t, "student_b1"),
 		"database password":   env.Config.MySQL.Password,
 		"session token":       teacher.Value,

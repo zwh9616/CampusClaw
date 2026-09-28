@@ -15,6 +15,7 @@
 //	ACCEPTANCE_BASE_URL                 default http://localhost:8080
 //	ACCEPTANCE_TEACHER_A_PASSWORD       required
 //	ACCEPTANCE_STUDENT_A1_PASSWORD      required
+//	ACCEPTANCE_TEACHER_B_PASSWORD       required
 //	ACCEPTANCE_STUDENT_B1_PASSWORD      required
 package main
 
@@ -45,6 +46,7 @@ func main() {
 	passwords := map[string]string{
 		"teacher_a":  os.Getenv("ACCEPTANCE_TEACHER_A_PASSWORD"),
 		"student_a1": os.Getenv("ACCEPTANCE_STUDENT_A1_PASSWORD"),
+		"teacher_b":  os.Getenv("ACCEPTANCE_TEACHER_B_PASSWORD"),
 		"student_b1": os.Getenv("ACCEPTANCE_STUDENT_B1_PASSWORD"),
 	}
 
@@ -117,7 +119,15 @@ func (b *browser) get(path string) (*http.Response, []byte, error) {
 	return b.do(request)
 }
 
-func (b *browser) postJSON(path, body string) (*http.Response, []byte, error) {
+var nextLoginAt time.Time
+
+func (b *browser) postJSON(path, body string, unpaced ...bool) (*http.Response, []byte, error) {
+	if path == "/api/login" && (len(unpaced) == 0 || !unpaced[0]) {
+		if wait := time.Until(nextLoginAt); wait > 0 {
+			time.Sleep(wait)
+		}
+		nextLoginAt = time.Now().Add(7 * time.Second)
+	}
 	request, err := http.NewRequest(http.MethodPost, b.base+path, strings.NewReader(body))
 	if err != nil {
 		return nil, nil, err
@@ -361,4 +371,9 @@ func ids(materials []materialJSON) []string {
 	}
 	sort.Strings(found)
 	return found
+}
+
+func jsonPassword(password string) string {
+	encoded, _ := json.Marshal(password)
+	return string(encoded)
 }

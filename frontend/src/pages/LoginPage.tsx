@@ -24,7 +24,11 @@ export default function LoginPage({ onAuthenticated }: Props) {
       // The server answers identically for a wrong password and an unknown
       // username, so the message here does not disclose which happened.
       if (failure instanceof api.ApiError) {
-        setError(failure.status === 401 ? '用户名或密码不正确。' : failure.message)
+        if (failure.status === 429) {
+          setError("请求过于频繁，请稍后重试。")
+        } else {
+          setError(failure.status === 401 ? '用户名或密码不正确。' : failure.message)
+        }
       } else {
         setError('无法连接到服务器，请重试。')
       }

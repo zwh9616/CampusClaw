@@ -25,15 +25,19 @@ MySQL 8 MUST 创建 classes(id,name,created_at)、users(id,username,password_has
 
 ### Requirement: DATA-02 Idempotent secret-safe seed
 
-初始化 MUST 提供 Class A、Class B、teacher_a（Teacher A，teacher/Class A）、student_a1（Student A1，student/Class A）、student_b1（Student B1，student/Class B）。初始密码 MUST 分别从 SEED_TEACHER_A_PASSWORD、SEED_STUDENT_A1_PASSWORD、SEED_STUDENT_B1_PASSWORD 读取并生成 bcrypt hash。重复初始化 MUST NOT 重复创建班级/用户、重置已存在密码、清空材料或覆盖上传数据。缺少必须秘密 MUST 启动失败并给出不含秘密的提示。仓库 MUST 仅提供无真实值的 .env.example，并忽略 .env。
+初始化 MUST 提供 Class A、Class B、teacher_a（Teacher A，teacher/Class A）、student_a1（Student A1，student/Class A）、teacher_b（Teacher B，teacher/Class B）、student_b1（Student B1，student/Class B）。四个初始密码 MUST 分别从 SEED_TEACHER_A_PASSWORD、SEED_STUDENT_A1_PASSWORD、SEED_TEACHER_B_PASSWORD、SEED_STUDENT_B1_PASSWORD 读取并生成 bcrypt hash；MUST NOT 使用默认密码。重复初始化 MUST NOT 重复创建班级/用户、重置已存在密码、清空材料或覆盖上传数据。缺少必须秘密 MUST 启动失败并给出不含秘密的提示。仓库 MUST 仅提供无真实值的 .env.example，并忽略 .env。
 
 #### Scenario: AC20 Repeat initialization preserves data
-- **GIVEN** 全新库已 seed，Teacher A 已上传材料，记录账号/班级计数、hash、材料/知识条目及文件字节
+- **GIVEN** 全新库已 seed，Teacher A 和 Teacher B 各已上传材料，记录账号/班级计数、hash、材料/知识条目及文件字节
 - **WHEN** 再次执行 seed 并重启 Compose 两次
-- **THEN** 仍只有两个种子班级和三个种子用户，原 hash、材料/知识条目及文件不变，可用原凭证登录
+- **THEN** 仍只有两个种子班级和四个种子用户，四个原 hash、材料/知识条目及文件不变，可用原凭证登录
 
 #### Scenario: DA02 Seed password source
 - **GIVEN** 测试运行时生成的环境变量密码，仓库中没有这些值
-- **WHEN** 初始化并读取 password_hash，用对应密码做 bcrypt 校验
-- **THEN** hash 不是明文且验证成功；删除必需环境变量再启动会失败，不落入默认密码
+- **WHEN** 初始化并读取四个种子用户的 password_hash，用各自环境变量密码做 bcrypt 校验；再移除 SEED_TEACHER_B_PASSWORD 单独尝试启动
+- **THEN** 四个 hash 均不是明文且验证成功；缺少 SEED_TEACHER_B_PASSWORD 时启动失败，不落入默认密码
 
+#### Scenario: AC29 Class B teacher seed login
+- **GIVEN** 全新库已完成 seed，Teacher B 的用户名为 teacher_b，密码来自 SEED_TEACHER_B_PASSWORD
+- **WHEN** 使用对应凭证 POST /api/login，再调用 GET /api/me
+- **THEN** 登录返回 200 并设置 Session Cookie，me 返回 role=teacher、class_name=Class B，class_id 对应 Class B

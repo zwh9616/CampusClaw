@@ -18,8 +18,10 @@ var envVars = []string{
 	"MYSQL_ROOT_PASSWORD",
 	"SEED_TEACHER_A_PASSWORD",
 	"SEED_STUDENT_A1_PASSWORD",
+	"SEED_TEACHER_B_PASSWORD",
 	"SEED_STUDENT_B1_PASSWORD",
 	"PUBLIC_ORIGIN",
+	"DEV_PUBLIC_ORIGIN",
 	"SESSION_COOKIE_SECURE",
 }
 
@@ -43,6 +45,7 @@ func validEnv(overrides map[string]string) map[string]string {
 		"MYSQL_PASSWORD":           "db-password",
 		"SEED_TEACHER_A_PASSWORD":  "teacher-password",
 		"SEED_STUDENT_A1_PASSWORD": "student-a1-password",
+		"SEED_TEACHER_B_PASSWORD":  "teacher-b-password",
 		"SEED_STUDENT_B1_PASSWORD": "student-b1-password",
 		"PUBLIC_ORIGIN":            "http://localhost:8080",
 		"SESSION_COOKIE_SECURE":    "false",
@@ -116,6 +119,24 @@ func TestLoadRejectsPasswordOutsideBcryptWindow(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsMissingOrOverlongTeacherBPassword(t *testing.T) {
+	for name, password := range map[string]string{
+		"missing":  "",
+		"overlong": strings.Repeat("x", 73),
+	} {
+		t.Run(name, func(t *testing.T) {
+			setEnv(t, validEnv(map[string]string{"SEED_TEACHER_B_PASSWORD": password}))
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "SEED_TEACHER_B_PASSWORD") {
+				t.Fatalf("Load() error = %v, want variable name", err)
+			}
+			if strings.Contains(err.Error(), "teacher-b-password") {
+				t.Fatalf("Load() leaked a secret: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadAcceptsPasswordAtBcryptLimit(t *testing.T) {
 	setEnv(t, validEnv(map[string]string{"SEED_TEACHER_A_PASSWORD": strings.Repeat("x", 72)}))
 
@@ -153,6 +174,32 @@ func TestLoadNormalisesTrailingSlash(t *testing.T) {
 
 	if got := cfg.PublicOrigin.String(); got != "https://campus.example.edu" {
 		t.Errorf("PublicOrigin = %q, want no trailing slash", got)
+	}
+}
+
+func TestLoadAllowsOnlyExplicitLocalViteOrigin(t *testing.T) {
+	setEnv(t, validEnv(map[string]string{"DEV_PUBLIC_ORIGIN": "http://localhost:5173"}))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("local Vite origin: %v", err)
+	}
+	if cfg.DevPublicOrigin == nil || cfg.DevPublicOrigin.String() != "http://localhost:5173" {
+		t.Fatalf("DevPublicOrigin = %v, want local Vite origin", cfg.DevPublicOrigin)
+	}
+
+	for name, overrides := range map[string]map[string]string{
+		"other dev port":         {"DEV_PUBLIC_ORIGIN": "http://localhost:5174"},
+		"external dev host":      {"DEV_PUBLIC_ORIGIN": "http://evil.example"},
+		"secure cookie":          {"DEV_PUBLIC_ORIGIN": "http://localhost:5173", "SESSION_COOKIE_SECURE": "true"},
+		"nonlocal public origin": {"DEV_PUBLIC_ORIGIN": "http://localhost:5173", "PUBLIC_ORIGIN": "https://school.example"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setEnv(t, validEnv(overrides))
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "DEV_PUBLIC_ORIGIN") {
+				t.Fatalf("Load() error = %v, want DEV_PUBLIC_ORIGIN rejection", err)
+			}
+		})
 	}
 }
 

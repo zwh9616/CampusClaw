@@ -54,3 +54,12 @@ GET /health MUST 无需登录、经 Nginx 转发至 Go，在 API 和数据库就
 - **GIVEN** 使用项目 Dockerfile 构建的 API 镜像
 - **WHEN** 启动系统并通过 Nginx 上传合法 PDF/DOCX，再以测试镜像移除必需 PDF 解析命令启动
 - **THEN** 正常镜像可解析两种格式，无须宿主机安装工具；缺失依赖的测试镜像启动失败，日志不含秘密
+
+### Requirement: RUN-05 Local Vite development API proxy
+
+在正常 Compose 的 Nginx 入口 http://localhost:8080 已就绪时，本机 Vite 开发服务器 MUST 固定监听 http://localhost:5173，端口被占用时 MUST 明确失败而不自动切换端口。Vite MUST 将 /api/* 请求原路径代理到 http://localhost:8080，由现有 Nginx 再转发给 Go；浏览器 MUST 继续使用相对 /api 地址与同源 Cookie，MUST NOT 请求 API 容器地址或依赖 CORS。仅在本地开发时，Compose MAY 将显式配置的 DEV_PUBLIC_ORIGIN=http://localhost:5173 传给 API，且 MUST 满足 AUTH-05 的启用限制。正常 Compose 浏览器入口和 api/db 不发布宿主机端口的要求 MUST 保持有效；Vite 开发服务器仅监听本机。
+
+#### Scenario: AC32 Vite dev uses same-origin API paths
+- **GIVEN** Compose 在 http://localhost:8080 正常运行，PUBLIC_ORIGIN=http://localhost:8080、SESSION_COOKIE_SECURE=false、DEV_PUBLIC_ORIGIN=http://localhost:5173，且本机执行 npm run dev
+- **WHEN** 浏览器打开 http://localhost:5173，依次登录、查询 /api/me 和材料列表、由教师上传材料并登出，再尝试从外站 Origin 发送登录 POST
+- **THEN** 浏览器业务请求始终以 http://localhost:5173/api/* 发出，代理保持路径与 Cookie，登录/上传等同源 POST 成功；外站 Origin 仍为 403，8080 正常入口仍可使用，api/db 无宿主机端口映射

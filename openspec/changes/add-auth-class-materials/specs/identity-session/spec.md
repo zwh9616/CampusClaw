@@ -67,7 +67,9 @@ Go MUST 独立检查 POST /api/materials 的当前用户角色，仅 teacher 可
 
 ### Requirement: AUTH-05 Same-origin mutations and private responses
 
-对 POST 请求，若存在 Origin，MUST 精确匹配 PUBLIC_ORIGIN，MUST NOT 要求同时存在 Referer；若无 Origin 但存在 Referer，MUST 验证其 scheme、host、有效 port 与 PUBLIC_ORIGIN 同源。Sec-Fetch-Site=cross-site MUST 拒绝，不因其他头匹配而放行。若三者均缺失，MUST 允许非浏览器 API 测试客户端继续认证后的流程；若仅存在 Sec-Fetch-Site，MUST 仅接受 same-origin 或 none，其他值返回 403。存在但为空/格式非法的 Origin 或 Referer MUST 返回 403；Origin 优先且不得在 Origin 校验失败后回退到 Referer。受保护 POST 的认证与角色检查 MUST 先于来源校验；认证及受保护数据 MUST no-store，MUST NOT 记录密码、token、DSN。
+对 POST 请求，若存在 Origin，MUST 精确匹配 PUBLIC_ORIGIN 或满足以下明确启用的本地开发来源，MUST NOT 要求同时存在 Referer；若无 Origin 但存在 Referer，MUST 验证其 scheme、host、有效 port 与当前允许的来源之一同源。Sec-Fetch-Site=cross-site MUST 拒绝，不因其他头匹配而放行。若三者均缺失，MUST 允许非浏览器 API 测试客户端继续认证后的流程；若仅存在 Sec-Fetch-Site，MUST 仅接受 same-origin 或 none，其他值返回 403。存在但为空/格式非法的 Origin 或 Referer MUST 返回 403；Origin 优先且不得在 Origin 校验失败后回退到 Referer。受保护 POST 的认证与角色检查 MUST 先于来源校验；认证及受保护数据 MUST no-store，MUST NOT 记录密码、token、DSN。
+
+仅当 PUBLIC_ORIGIN=http://localhost:8080 且 SESSION_COOKIE_SECURE=false 时，服务端 MAY 接受显式配置的 DEV_PUBLIC_ORIGIN=http://localhost:5173，供本机 Vite 开发代理使用；空值视为未启用。DEV_PUBLIC_ORIGIN 非空但不满足上述固定本地组合时 MUST 拒绝启动。生产部署 MUST 不启用该开发来源；MUST NOT 依据请求 Host 或客户端可控的 X-Forwarded-* 扩大来源白名单。两种允许来源共用上述 Origin/Referer/Sec-Fetch-Site 校验规则，不开放 CORS。
 
 #### Scenario: AU03 Cross-origin upload rejected
 - **GIVEN** Teacher A 的有效 Session
@@ -83,3 +85,12 @@ Go MUST 独立检查 POST /api/materials 的当前用户角色，仅 teacher 可
 - **GIVEN** Teacher A 有效 Session 与合法文件
 - **WHEN** 分别提交外站 Origin 加同源 Referer、只有外站 Referer、Origin=null、空 Origin、同源 Origin 加 Sec-Fetch-Site=cross-site、仅 Sec-Fetch-Site=same-site
 - **THEN** 均 403 且无材料、知识条目和原文件写入
+
+### Requirement: AUTH-06 Public login throttling and safe failure audit
+
+公网 Nginx MUST 对精确路径 /api/login 按直接连接的客户端 IP 施加共享限流：持续速率 10 次/分钟，额外突发 5 次，突发请求不排队延迟；MUST NOT 用客户端传入的 X-Forwarded-* 作为限流键。限流 MUST 同时计入成功和失败的请求，MUST NOT 按用户名设置不同阈值或暴露账号是否存在。超限 MUST 在转发到 Go 前返回 429，响应 MUST 为统一 JSON 错误体 {"error":{"code":"rate_limited","message":"请求过于频繁，请稍后重试"}}，设置 Cache-Control: no-store，不创建或变更 Session。未超限时错误密码与未知用户名仍 MUST 返回同一 401 响应体。Go MUST 仅在服务端记录不含敏感值的失败原因码，区分未知账号、错误密码、超长密码；Nginx MUST 记录限流拒绝事件，日志 MUST NOT 包含密码、Session Token 或请求体。
+
+#### Scenario: AC31 Login limit applies uniformly
+- **GIVEN** 经 Nginx 使用同一客户端 IP，且限流状态已清空
+- **WHEN** 在短时间内对 /api/login 混合提交已存在账号、未知账号、正确与错误密码，超过允许的突发容量
+- **THEN** 限额内的错误密码和未知账号均返回相同 401；超限请求不论用户名与密码均返回相同 JSON 429、无 Set-Cookie 和有效新 Session；其他 API 不受登录限流影响，日志只含安全原因码或拒绝事件

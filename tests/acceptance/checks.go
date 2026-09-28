@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // execute runs every acceptance criterion in order and returns once they have
@@ -23,6 +24,8 @@ func (r *runner) execute() error {
 		return nil
 	}
 
+	teacherB := r.checkTeacherBLogin()
+
 	r.checkAuthenticatedAPIs(studentB)
 	r.checkRejectedLogins()
 	r.checkTeacherLogin(teacher)
@@ -34,6 +37,7 @@ func (r *runner) execute() error {
 	markdownID := r.checkTextUploads(teacher, studentA, studentB)
 
 	r.checkClassIsolation(studentB, markdownID)
+	r.checkTeacherBMaterial(teacherB, studentA, studentB)
 	r.checkDownloads(studentA, studentB, teacher, markdownID)
 	r.checkDirectUploadPaths(studentB, teacher)
 	r.checkForgedTenant(teacher)
@@ -43,6 +47,7 @@ func (r *runner) execute() error {
 	pdfID, docxID := r.checkDocumentUploads(teacher, studentA)
 	r.checkDocumentFailures(teacher)
 	r.checkDocumentAccessControl(studentA, studentB, pdfID, docxID)
+	r.checkLoginRateLimit()
 
 	return nil
 }
@@ -951,4 +956,158 @@ func itoa(value int) string {
 		value /= 10
 	}
 	return string(digits)
+}
+
+// AC29: the fourth seed account is a real Class B teacher.
+func (r *runner) checkTeacherBLogin() *browser {
+	r.begin("AC29", "Teacher B login restores Class B teacher identity")
+	session, ok := r.login("teacher_b")
+	if !ok {
+		return nil
+	}
+	response, payload, err := session.get("/api/me")
+	if err != nil {
+		r.fail("Teacher B me: %v", err)
+		return nil
+	}
+	r.check(response.StatusCode == http.StatusOK, "Teacher B me status = %d", response.StatusCode)
+	user, err := decodeUser(payload)
+	if err != nil {
+		r.fail("decode Teacher B me: %v", err)
+		return nil
+	}
+	r.check(user.Username == "teacher_b" && user.Role == "teacher" && user.ClassName == "Class B" && user.ClassID != "",
+		"Teacher B identity = %+v", user)
+	return session
+}
+
+// AC30: a Class B original is visible only to its own class.
+func (r *runner) checkTeacherBMaterial(teacherB, studentA, studentB *browser) {
+	r.begin("AC30", "Teacher B material stays within Class B")
+	if teacherB == nil || studentA == nil || studentB == nil {
+		r.fail("required sessions were not established")
+		return
+	}
+	original := []byte("Class B acceptance original\n")
+	material, status, payload := r.uploadAndDecode(teacherB, uploadSpec{
+		title: "Class B acceptance", filename: "class-b.md", content: original,
+	})
+	r.check(status == http.StatusCreated, "Teacher B upload status = %d (%s)", status, trim(payload))
+	if status != http.StatusCreated || material.ID == "" {
+		return
+	}
+	meResponse, mePayload, err := teacherB.get("/api/me")
+	if err != nil || meResponse.StatusCode != http.StatusOK {
+		r.fail("Teacher B me after upload: status %v, error %v", meResponse, err)
+		return
+	}
+	teacher, err := decodeUser(mePayload)
+	if err != nil {
+		r.fail("decode Teacher B identity: %v", err)
+		return
+	}
+	r.check(material.ClassID == teacher.ClassID && material.UploadedBy == teacher.ID,
+		"material owner = class %q / user %q, want Teacher B", material.ClassID, material.UploadedBy)
+
+	visible, err := r.materialIDsFor(studentB)
+	if err != nil {
+		r.fail("Student B1 list: %v", err)
+	} else {
+		r.check(contains(visible, material.ID), "Student B1 list lacks %s", material.ID)
+	}
+	_, content, err := r.fetchDetail(studentB, material.ID)
+	r.check(err == nil && content == string(original), "Student B1 detail: content %q, error %v", content, err)
+	download, data, err := studentB.get("/api/materials/" + material.ID + "/file")
+	if err != nil {
+		r.fail("Student B1 download: %v", err)
+	} else {
+		r.check(download.StatusCode == http.StatusOK && bytes.Equal(data, original),
+			"Student B1 download status %d / original mismatch", download.StatusCode)
+	}
+
+	hidden, err := r.materialIDsFor(studentA)
+	if err != nil {
+		r.fail("Student A1 list: %v", err)
+	} else {
+		r.check(!contains(hidden, material.ID), "Student A1 list exposes %s", material.ID)
+	}
+	for _, suffix := range []string{"", "/file"} {
+		cross, crossBody, crossErr := studentA.get("/api/materials/" + material.ID + suffix)
+		missing, missingBody, missingErr := studentA.get("/api/materials/999999999999999" + suffix)
+		if crossErr != nil || missingErr != nil {
+			r.fail("Student A1 %q: cross error %v, missing error %v", suffix, crossErr, missingErr)
+			continue
+		}
+		r.check(cross.StatusCode == http.StatusNotFound && missing.StatusCode == http.StatusNotFound &&
+			bytes.Equal(crossBody, missingBody), "Student A1 %q differs from missing-material 404", suffix)
+	}
+}
+
+// AC31 runs last because it deliberately saturates the gateway's shared bucket.
+func (r *runner) checkLoginRateLimit() {
+	r.begin("AC31", "Login rate limit returns uniform JSON 429 per client IP")
+	// The earlier acceptance criteria used the same gateway and peer address.
+	// Let its small burst bucket fully drain before measuring this scenario.
+	time.Sleep(36 * time.Second)
+	session, err := newBrowser("rate-limit", r.baseURL)
+	if err != nil {
+		r.fail("create rate-limit client: %v", err)
+		return
+	}
+	wrong, wrongBody, err := session.postJSON("/api/login", `{"username":"teacher_a","password":"wrong"}`, true)
+	if err != nil {
+		r.fail("wrong-password login: %v", err)
+		return
+	}
+	unknown, unknownBody, err := session.postJSON("/api/login", `{"username":"no_such_user","password":"wrong"}`, true)
+	if err != nil {
+		r.fail("unknown-user login: %v", err)
+		return
+	}
+	r.check(wrong.StatusCode == http.StatusUnauthorized && unknown.StatusCode == http.StatusUnauthorized &&
+		bytes.Equal(wrongBody, unknownBody), "initial credential failures are not identical 401 responses")
+
+	var rateBody []byte
+	for i := 0; i < 20; i++ {
+		response, payload, err := session.postJSON("/api/login", `{"username":"no_such_user","password":"wrong"}`, true)
+		if err != nil {
+			r.fail("burst login %d: %v", i, err)
+			return
+		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			rateBody = payload
+			r.check(decodeErrorCode(payload) == "rate_limited" && response.Header.Get("Cache-Control") == "no-store" &&
+				response.Header.Get("Set-Cookie") == "", "429 response lacks generic JSON/no-store/no-cookie")
+			break
+		}
+	}
+	if len(rateBody) == 0 {
+		r.fail("login burst did not produce 429")
+		return
+	}
+	blocked, err := newBrowser("blocked-correct-login", r.baseURL)
+	if err != nil {
+		r.fail("create blocked client: %v", err)
+		return
+	}
+	correctBody := `{"username":"teacher_a","password":` + jsonPassword(r.passwords["teacher_a"]) + `}`
+	response, payload, err := blocked.postJSON("/api/login", correctBody, true)
+	if err != nil {
+		r.fail("blocked correct login: %v", err)
+		return
+	}
+	r.check(response.StatusCode == http.StatusTooManyRequests && bytes.Equal(payload, rateBody) &&
+		response.Header.Get("Set-Cookie") == "", "correct credentials bypassed limit or changed 429 response")
+	me, _, err := blocked.get("/api/me")
+	if err != nil {
+		r.fail("me after blocked login: %v", err)
+	} else {
+		r.check(me.StatusCode == http.StatusUnauthorized, "blocked login created a session")
+	}
+	health, _, err := blocked.get("/health")
+	if err != nil {
+		r.fail("health after login limit: %v", err)
+	} else {
+		r.check(health.StatusCode == http.StatusOK, "login limit affected /health")
+	}
 }

@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CampusClaw · 北大红 UI 方案预览</title>
+    <style>
+      :root {
+        font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+        color: #292624;
+        background: #e9e7e4;
+        font-synthesis: none;
+      }
+
+      * { box-sizing: border-box; }
+      head, style, script, title, meta { display: none !important; }
+      body { margin: 0; }
+      button, input { font: inherit; }
+      button { cursor: pointer; }
+
+      .preview-bar {
+        position: sticky;
+        z-index: 10;
+        top: 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 12px max(24px, calc((100vw - 1320px) / 2));
+        background: #222325;
+        color: #fff;
+        box-shadow: 0 3px 16px #0002;
+      }
+      .preview-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+      .preview-title strong { font-size: 14px; letter-spacing: .04em; }
+      .preview-title span { color: #bfc0c2; font-size: 12px; }
+      .preview-controls { display: flex; flex-wrap: wrap; gap: 16px; }
+      .segmented { display: inline-flex; padding: 3px; gap: 3px; border-radius: 8px; background: #ffffff20; }
+      .segmented button {
+        padding: 7px 13px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: #d8d8da;
+        font-size: 12px;
+      }
+      .segmented button[aria-pressed="true"] { background: #fff; color: #242426; font-weight: 700; }
+      .segmented button:focus-visible, .prototype button:focus-visible, .prototype input:focus-visible {
+        outline: 3px solid #dcaa56;
+        outline-offset: 2px;
+      }
+      .preview-note { max-width: 1320px; margin: 18px auto 10px; padding: 0 24px; color: #57534f; font-size: 13px; }
+      .preview-note strong { color: #94070a; }
+
+      .prototype {
+        --red: #94070a;
+        --red-dark: #760407;
+        --red-light: #f7e9e8;
+        --ink: #272728;
+        --muted: #777479;
+        --line: #e8e4e1;
+        --surface: #fff;
+        --canvas: #f7f7f5;
+        width: min(1280px, calc(100% - 48px));
+        min-height: 760px;
+        margin: 0 auto 36px;
+        overflow: hidden;
+        background: var(--canvas);
+        color: var(--ink);
+        border: 1px solid #d6d2cd;
+        border-radius: 16px;
+        box-shadow: 0 24px 75px #2b21151f;
+      }
+      .screen[hidden] { display: none !important; }
+      .brand { display: flex; align-items: center; gap: 11px; font-size: 18px; font-weight: 750; letter-spacing: -.025em; }
+      .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--red); color: #fff; font-family: Georgia, serif; font-size: 19px; letter-spacing: -.14em; padding-right: 3px; }
+      .eyebrow { color: var(--red); font-size: 11px; font-weight: 800; letter-spacing: .18em; }
+      h1, h2, h3, p { display: block; margin-top: 0; }
+      h1 { font-size: clamp(30px, 3.2vw, 46px); letter-spacing: -.055em; line-height: 1.2; }
+      h2 { font-size: 23px; letter-spacing: -.04em; }
+      h3 { font-size: 15px; }
+      .muted { color: var(--muted); }
+      .small { font-size: 12px; }
+      .primary, .quiet-button, .outline-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        min-height: 40px;
+        padding: 0 17px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .primary { background: var(--red); color: #fff; }
+      .primary:hover { background: var(--red-dark); }
+      .quiet-button { background: transparent; color: var(--ink); }
+      .outline-button { background: var(--surface); border-color: var(--line); color: var(--ink); }
+      .field { margin: 20px 0; }
+      .field label { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 700; }
+      .field input { width: 100%; height: 46px; padding: 0 14px; border: 1px solid #dcd8d4; border-radius: 8px; background: #fff; color: var(--ink); outline-color: var(--red); }
+      .field input::placeholder { color: #a6a3a0; }
+
+      /* The same sample content is styled three different ways. */
+      .login-screen { min-height: 760px; display: grid; grid-template-columns: 1fr 1fr; }
+      .login-story { display: flex; flex-direction: column; justify-content: space-between; padding: 46px 8% 54px; }
+      .login-story-content { max-width: 510px; margin: auto 0; }
+      .login-story-content p { max-width: 420px; color: var(--muted); font-size: 15px; line-height: 1.9; }
+      .login-foot { font-size: 12px; color: var(--muted); }
+      .login-side { display: grid; align-items: center; padding: 48px min(11%, 92px); }
+      .login-card { width: min(100%, 390px); margin: auto; }
+      .login-card h2 { margin-bottom: 8px; }
+      .login-card .primary { width: 100%; margin-top: 8px; height: 46px; }
+      .login-card-note { margin: 19px 0 0; color: var(--muted); font-size: 12px; text-align: center; }
+      .story-decoration { display: flex; gap: 7px; margin-bottom: 30px; }
+      .story-decoration i { width: 28px; height: 4px; background: var(--red); border-radius: 5px; }
+      .story-decoration i + i { width: 8px; opacity: .32; }
+
+      .materials-screen { min-height: 760px; }
+      .app-head { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 21px 46px; background: var(--surface); border-bottom: 1px solid var(--line); }
+      .head-right { display: flex; align-items: center; gap: 15px; font-size: 12px; }
+      .user-avatar { display: grid; place-items: center; width: 33px; height: 33px; border-radius: 50%; background: var(--red-light); color: var(--red); font-weight: 800; }
+      .app-body { max-width: 1100px; margin: 0 auto; padding: 45px 28px 72px; }
+      .breadcrumbs { margin-bottom: 28px; color: var(--muted); font-size: 12px; }
+      .page-intro { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 30px; }
+      .page-intro h1 { margin: 6px 0 7px; font-size: 33px; }
+      .page-intro p { margin: 0; color: var(--muted); font-size: 13px; }
+      .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(280px, .8fr); gap: 20px; }
+      .panel { min-width: 0; padding: 25px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+      .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 19px; }
+      .panel-head h2 { margin: 0; font-size: 18px; }
+      .count { color: var(--muted); font-size: 12px; }
+      .material-row { display: flex; align-items: center; justify-content: space-between; gap: 13px; padding: 17px 0; border-top: 1px solid var(--line); }
+      .material-row:first-of-type { border-top: 0; }
+      .file-icon { display: grid; flex: 0 0 auto; place-items: center; width: 39px; height: 45px; border: 1px solid #e6c8c8; border-radius: 6px; background: #fdf5f4; color: var(--red); font-size: 10px; font-weight: 800; }
+      .file-info { flex: 1; min-width: 0; }
+      .file-info strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+      .file-info span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+      .row-link { border: 0; background: transparent; color: var(--red); font-size: 12px; font-weight: 800; white-space: nowrap; }
+      .upload-zone { display: grid; place-items: center; gap: 8px; min-height: 178px; margin-bottom: 18px; border: 1px dashed #c9b7b4; border-radius: 9px; background: #fcfaf9; text-align: center; }
+      .upload-symbol { display: grid; place-items: center; width: 37px; height: 37px; border-radius: 50%; background: var(--red-light); color: var(--red); font-size: 23px; font-weight: 300; }
+      .upload-zone strong { font-size: 13px; }
+      .upload-zone span { color: var(--muted); font-size: 11px; line-height: 1.55; }
+      .upload-panel .primary { width: 100%; }
+      .upload-hint { margin: 15px 0 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+      .toast { position: fixed; z-index: 30; left: 50%; bottom: 25px; transform: translateX(-50%); padding: 10px 16px; border-radius: 7px; background: #222; color: white; font-size: 12px; box-shadow: 0 5px 18px #0003; }
+
+      /* A — quiet white canvas and small red accents. */
+      .prototype[data-theme="a"] { --canvas: #f7f7f5; --surface: #fff; --line: #e8e7e3; }
+      .prototype[data-theme="a"] .login-story { background: #fff; }
+      .prototype[data-theme="a"] .login-story h1 { max-width: 470px; }
+      .prototype[data-theme="a"] .login-side { background: #f6f6f4; }
+      .prototype[data-theme="a"] .login-card { padding: 38px; border: 1px solid #e9e7e3; border-radius: 12px; background: white; box-shadow: 0 24px 48px #25201709; }
+      .prototype[data-theme="a"] .app-head { border-top: 4px solid var(--red); }
+
+      /* B — a restrained editorial treatment, like a reading room. */
+      .prototype[data-theme="b"] { --canvas: #f5f1e8; --surface: #fffdf8; --line: #e6ddcc; --ink: #342c26; --muted: #766c5f; --red-light: #f3e4dc; }
+      .prototype[data-theme="b"] h1, .prototype[data-theme="b"] h2, .prototype[data-theme="b"] .brand { font-family: "Songti SC", "Noto Serif CJK SC", "SimSun", serif; letter-spacing: .015em; }
+      .prototype[data-theme="b"] .brand-mark { border-radius: 50%; background: var(--red); }
+      .prototype[data-theme="b"] .login-story { position: relative; background: #f1e9db; }
+      .prototype[data-theme="b"] .login-story::before { content: ""; position: absolute; inset: 23px; border: 1px solid #d8cbb7; pointer-events: none; }
+      .prototype[data-theme="b"] .login-story-content { position: relative; }
+      .prototype[data-theme="b"] .login-story h1 { font-size: clamp(34px, 3.5vw, 50px); line-height: 1.35; }
+      .prototype[data-theme="b"] .login-side { background: #fffdf8; }
+      .prototype[data-theme="b"] .login-card { padding: 4px 10px; }
+      .prototype[data-theme="b"] .login-card::before { content: ""; display: block; width: 34px; height: 3px; margin-bottom: 36px; background: #b99a64; }
+      .prototype[data-theme="b"] .primary, .prototype[data-theme="b"] .field input, .prototype[data-theme="b"] .panel, .prototype[data-theme="b"] .outline-button { border-radius: 3px; }
+      .prototype[data-theme="b"] .app-head { border-bottom: 2px solid var(--red); }
+      .prototype[data-theme="b"] .panel { box-shadow: 0 8px 18px #6a4a2210; }
+      .prototype[data-theme="b"] .page-intro h1 { font-size: 35px; }
+      .prototype[data-theme="b"] .upload-zone { background: #fbf7ef; }
+
+      /* C — a civic portal with a large crimson frame. */
+      .prototype[data-theme="c"] { --canvas: #f4f3f2; --surface: #fff; --line: #e5e2e0; --red-light: #f7e6e4; }
+      .prototype[data-theme="c"] .login-story { color: white; background: linear-gradient(155deg, #97090d, #640306); }
+      .prototype[data-theme="c"] .login-story p, .prototype[data-theme="c"] .login-foot { color: #f6d9d6; }
+      .prototype[data-theme="c"] .login-story .eyebrow { color: #efd8af; }
+      .prototype[data-theme="c"] .login-story .brand-mark { background: #fff; color: var(--red); }
+      .prototype[data-theme="c"] .story-decoration i { background: #e6c690; }
+      .prototype[data-theme="c"] .login-side { background: #fff; }
+      .prototype[data-theme="c"] .login-card { padding: 28px; }
+      .prototype[data-theme="c"] .app-head { min-height: 83px; background: var(--red); color: #fff; border: 0; }
+      .prototype[data-theme="c"] .app-head .brand-mark { background: #fff; color: var(--red); }
+      .prototype[data-theme="c"] .app-head .muted { color: #f0c9c9; }
+      .prototype[data-theme="c"] .app-head .quiet-button { color: #fff; border: 1px solid #ffffff5c; }
+      .prototype[data-theme="c"] .app-head .user-avatar { background: #ffffff2d; color: #fff; }
+      .prototype[data-theme="c"] .breadcrumbs { color: #8a7778; }
+      .prototype[data-theme="c"] .page-intro { padding: 8px 0 25px; border-bottom: 1px solid #ded7d6; }
+      .prototype[data-theme="c"] .panel { border-radius: 8px; }
+      .prototype[data-theme="c"] .upload-zone { background: #faf9f8; }
+
+      @media (max-width: 840px) {
+        .login-screen { grid-template-columns: 1fr; }
+        .login-story { min-height: 310px; padding: 28px 7%; }
+        .login-story-content { margin: 38px 0 20px; }
+        .login-story h1 { font-size: 31px; }
+        .login-story-content p { font-size: 13px; }
+        .login-foot { display: none; }
+        .login-side { min-height: 410px; padding: 32px 7%; }
+        .dashboard-grid { grid-template-columns: 1fr; }
+        .app-head { padding: 18px 24px; }
+      }
+      @media (max-width: 560px) {
+        .preview-bar { padding: 12px; }
+        .preview-note { padding: 0 12px; }
+        .prototype { width: calc(100% - 24px); border-radius: 9px; }
+        .segmented button { padding: 7px 9px; }
+        .login-story { min-height: 270px; }
+        .login-side { min-height: 430px; }
+        .prototype[data-theme="a"] .login-card { padding: 26px; }
+        .app-head .head-right .muted { display: none; }
+        .app-body { padding: 30px 17px 55px; }
+        .page-intro { align-items: start; flex-direction: column; }
+        .page-intro h1 { font-size: 29px; }
+        .panel { padding: 19px; }
+        .material-row { flex-wrap: wrap; }
+        .row-link { margin-left: 50px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="preview-bar">
+      <div class="preview-title"><strong>CampusClaw · 北大红 UI 原型</strong><span>静态视觉预览 · 示例内容</span></div>
+      <div class="preview-controls">
+        <div class="segmented" role="group" aria-label="选择设计方案">
+          <button type="button" data-theme-button="a" aria-pressed="true">A 留白学院</button>
+          <button type="button" data-theme-button="b" aria-pressed="false">B 书卷文雅</button>
+          <button type="button" data-theme-button="c" aria-pressed="false">C 红色门廊</button>
+        </div>
+        <div class="segmented" role="group" aria-label="选择预览页面">
+          <button type="button" data-view-button="login" aria-pressed="false">登录页</button>
+          <button type="button" data-view-button="materials" aria-pressed="true">材料页</button>
+        </div>
+      </div>
+    </div>
+    <p class="preview-note"><strong id="scheme-label">A · 留白学院风</strong> <span id="scheme-description">以留白和清晰的信息层级为主，红色只强调关键操作。</span></p>
+
+    <main class="prototype" id="prototype" data-theme="a">
+      <div class="screen login-screen" data-view="login" hidden>
+        <div class="login-story">
+          <div class="brand"><span class="brand-mark">CC</span><span>CampusClaw</span></div>
+          <div class="login-story-content">
+            <div class="story-decoration"><i></i><i></i><i></i></div>
+            <div class="eyebrow">CAMPUS LEARNING SPACE</div>
+            <h1>让每一份教学资料，<br />都有清晰的归处。</h1>
+            <p>课程资料集中保存，师生随时查阅。把注意力留给学习本身。</p>
+          </div>
+          <div class="login-foot">CampusClaw · 校园教学材料平台</div>
+        </div>
+        <div class="login-side">
+          <div class="login-card">
+            <div class="eyebrow">WELCOME BACK</div>
+            <h2>登录平台</h2>
+            <p class="muted small">使用学校发放的账号继续。</p>
+            <div class="field"><label for="username">用户名</label><input id="username" type="text" placeholder="请输入用户名" autocomplete="off" /></div>
+            <div class="field"><label for="password">密码</label><input id="password" type="password" placeholder="请输入密码" autocomplete="off" /></div>
+            <button class="primary" type="button" data-demo-action>登录 <span aria-hidden="true">→</span></button>
+            <p class="login-card-note">这是视觉原型，登录功能未接入。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="screen materials-screen" data-view="materials">
+        <header class="app-head">
+          <div class="brand"><span class="brand-mark">CC</span><span>CampusClaw</span></div>
+          <div class="head-right"><span class="muted">高一年级 · 一班</span><span class="user-avatar">师</span><strong>王老师</strong><button class="quiet-button" type="button" data-demo-action>退出</button></div>
+        </header>
+        <div class="app-body">
+          <div class="breadcrumbs">教学空间 / 本班材料</div>
+          <div class="page-intro">
+            <div><div class="eyebrow">CLASS MATERIALS</div><h1>本班材料</h1><p>整理与分享课程资料，让班级学习更有条理。</p></div>
+            <button type="button" class="outline-button" data-demo-action>全部材料 <span aria-hidden="true">↗</span></button>
+          </div>
+          <div class="dashboard-grid">
+            <section class="panel">
+              <div class="panel-head"><h2>最近资料</h2><span class="count">共 3 份</span></div>
+              <div class="material-row"><span class="file-icon">PDF</span><div class="file-info"><strong>第一单元课堂讲义</strong><span>课程讲义.pdf · 今天 09:30</span></div><button class="row-link" type="button" data-demo-action>查看 →</button></div>
+              <div class="material-row"><span class="file-icon">DOC</span><div class="file-info"><strong>阅读与思考：课后练习</strong><span>课后练习.docx · 昨天 16:20</span></div><button class="row-link" type="button" data-demo-action>查看 →</button></div>
+              <div class="material-row"><span class="file-icon">TXT</span><div class="file-info"><strong>本周学习安排</strong><span>学习安排.txt · 9 月 25 日</span></div><button class="row-link" type="button" data-demo-action>查看 →</button></div>
+            </section>
+            <section class="panel upload-panel">
+              <div class="panel-head"><h2>上传新材料</h2></div>
+              <div class="upload-zone"><div class="upload-symbol">+</div><strong>将资料分享给本班</strong><span>支持 .md / .txt / .pdf / .docx<br />单个文件不超过 5 MiB</span></div>
+              <button class="primary" type="button" data-demo-action>选择文件并上传</button>
+              <p class="upload-hint">PDF、DOCX 仅提取可读取文本；扫描件不支持 OCR。</p>
+            </section>
+          </div>
+        </div>
+      </div>
+    </main>
+    <script>
+      const prototype = document.getElementById('prototype')
+      const schemeLabel = document.getElementById('scheme-label')
+      const schemeDescription = document.getElementById('scheme-description')
+      const schemes = {
+        a: ['A · 留白学院风', '以留白和清晰的信息层级为主，红色只强调关键操作。'],
+        b: ['B · 书卷文雅风', '米白纸张感和雅致排版，适合更有人文气息的校园体验。'],
+        c: ['C · 红色门廊风', '深红色建立鲜明的入口与导航，内容仍保持简洁。'],
+      }
+
+      document.querySelectorAll('[data-theme-button]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const theme = button.dataset.themeButton
+          prototype.dataset.theme = theme
+          schemeLabel.textContent = schemes[theme][0]
+          schemeDescription.textContent = schemes[theme][1]
+          document.querySelectorAll('[data-theme-button]').forEach((item) => {
+            item.setAttribute('aria-pressed', String(item === button))
+          })
+        })
+      })
+
+      document.querySelectorAll('[data-view-button]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const view = button.dataset.viewButton
+          document.querySelectorAll('[data-view]').forEach((screen) => {
+            screen.hidden = screen.dataset.view !== view
+          })
+          document.querySelectorAll('[data-view-button]').forEach((item) => {
+            item.setAttribute('aria-pressed', String(item === button))
+          })
+        })
+      })
+
+      document.querySelectorAll('[data-demo-action]').forEach((button) => {
+        button.addEventListener('click', () => {
+          document.querySelector('.toast')?.remove()
+          const toast = document.createElement('div')
+          toast.className = 'toast'
+          toast.textContent = '当前为视觉原型，业务操作尚未接入。'
+          document.body.append(toast)
+          window.setTimeout(() => toast.remove(), 2300)
+        })
+      })
+    </script>
+  </body>
+</html>

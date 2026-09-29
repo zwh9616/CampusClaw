@@ -1,5 +1,11 @@
 schema: spec-driven
 
+context: |
+  The frontend uses React 18, TypeScript and Vite. UI work follows
+  frontend/STYLE_GUIDE.md: the selected editorial style uses Beida red, warm paper
+  surfaces, restrained serif headings, and shared CSS design tokens. Future
+  frontend proposals should preserve this direction or explain a deliberate exception.
+
 # Project context (optional)
 # This is shown to AI when creating artifacts.
 # Add your tech stack, conventions, style guides, domain knowledge, etc.

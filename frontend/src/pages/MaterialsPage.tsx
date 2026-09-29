@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import * as api from '../api'
 import type { Material, MaterialDetail, User } from '../api'
+import Brand from '../components/Brand'
 
 interface Props {
   user: User
@@ -74,8 +75,9 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
   }
 
   return (
-    <main className="app">
-      <header className="bar">
+    <main className="app materials-page">
+      <header className="bar site-header">
+        <Brand />
         <div>
           <strong>{user.username}</strong>
           <span className="muted">
@@ -88,59 +90,67 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
         </button>
       </header>
 
+      <div className="page-intro">
+        <p className="eyebrow">CLASS MATERIALS</p>
+        <h1>本班材料</h1>
+        <p className="muted">整理与分享课程资料，让班级学习更有条理。</p>
+      </div>
+
       {error !== null && (
         <p className="error" role="alert">
           {error}
         </p>
       )}
-      {notice !== null && <p className="notice">{notice}</p>}
+      {notice !== null && <p className="notice" role="status">{notice}</p>}
 
-      {user.role === 'teacher' && (
-        <UploadPanel
-          onUploaded={async (title) => {
-            setNotice(`已上传「${title}」。`)
-            setDetail(null)
-            await refresh()
-          }}
-          onUnauthorized={onUnauthorized}
-        />
-      )}
-
-      <section className="card">
-        <h2>本班材料</h2>
-
-        {loading && <p className="muted">加载中…</p>}
-
-        {!loading && materials.length === 0 && <p className="muted">本班还没有材料。</p>}
-
-        {materials.length > 0 && (
-          <ul className="materials">
-            {materials.map((material) => (
-              <li key={material.id}>
-                <div className="material-main">
-                  <strong>{material.title}</strong>
-                  <span className="muted">
-                    {' '}
-                    {material.original_filename} · {material.content_type} ·{' '}
-                    {formatTimestamp(material.created_at)}
-                  </span>
-                </div>
-                <div className="material-actions">
-                  <button type="button" className="secondary" onClick={() => void handleOpen(material)}>
-                    查看
-                  </button>
-                  <a className="button secondary" href={api.downloadPath(material.id)}>
-                    下载
-                  </a>
-                </div>
-              </li>
-            ))}
-          </ul>
+      <div className="dashboard-grid">
+        {user.role === 'teacher' && (
+          <UploadPanel
+            onUploaded={async (title) => {
+              setNotice(`已上传「${title}」。`)
+              setDetail(null)
+              await refresh()
+            }}
+            onUnauthorized={onUnauthorized}
+          />
         )}
-      </section>
+
+        <section className="card materials-card">
+          <h2>资料列表</h2>
+
+          {loading && <p className="muted">加载中…</p>}
+
+          {!loading && materials.length === 0 && <p className="muted">本班还没有材料。</p>}
+
+          {materials.length > 0 && (
+            <ul className="materials">
+              {materials.map((material) => (
+                <li key={material.id}>
+                  <div className="material-main">
+                    <strong>{material.title}</strong>
+                    <span className="muted">
+                      {' '}
+                      {material.original_filename} · {material.content_type} ·{' '}
+                      {formatTimestamp(material.created_at)}
+                    </span>
+                  </div>
+                  <div className="material-actions">
+                    <button type="button" className="secondary" onClick={() => void handleOpen(material)}>
+                      查看
+                    </button>
+                    <a className="button secondary" href={api.downloadPath(material.id)}>
+                      下载
+                    </a>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
 
       {detail !== null && (
-        <section className="card">
+        <section className="card detail-card">
           <h2>{detail.material.title}</h2>
           <p className="muted">{detail.material.original_filename} · 提取文本</p>
           {/* Rendered as text, never as markup: material content is untrusted. */}
@@ -195,7 +205,7 @@ function UploadPanel({ onUploaded, onUnauthorized }: UploadPanelProps) {
   }
 
   return (
-    <section className="card">
+    <section className="card upload-card">
       <h2>上传材料</h2>
       <p className="muted">
         支持 {api.SUPPORTED_EXTENSIONS.join(' / ')}，单个文件不超过 5 MiB。

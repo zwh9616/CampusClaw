@@ -15,6 +15,8 @@ Browser --http://localhost:8080--> web (Nginx :80)
                                    |-- /                -> React 18 静态产物 / SPA fallback
                                    |-- /api/*、/health  -> api (Go net/http :8081)
                                    |                        |-- db (MySQL 8 :3306)
+                                   |                        |-- qdrant (向量库 :6333)
+                                   |                        |-- 嵌入网关 / 对话网关（服务端调用）
                                    |                        `-- /uploads 私有持久化卷
                                    `-- /uploads、/uploads/* -> 404
 ```
@@ -22,10 +24,14 @@ Browser --http://localhost:8080--> web (Nginx :80)
 - 前端：React 18 + TypeScript + Vite（镜像内 `npm ci` 后构建，产物复制进 Nginx）
 - 后端：Go `net/http` + `database/sql` + MySQL 驱动 + `golang.org/x/crypto/bcrypt`
 - 数据库：MySQL 8.0（≥ 8.0.16，使用 CHECK 约束）
+- 向量库：Compose 内的私有 Qdrant，只存向量与标识；切片正文始终在 MySQL
+- 模型网关：兼容 OpenAI `/embeddings` 与 `/chat/completions` 的服务端网关，
+  由浏览器之外调用，密钥只存在于服务端配置
 - 文档解析：PDF 走 API 镜像内的 Poppler（`pdfinfo` / `pdftotext`）；DOCX 走 Go 标准库
   `archive/zip` + `encoding/xml`
 
-Compose 只发布 `web` 的 `8080:80`；`api` 与 `db` 没有任何宿主机端口。
+Compose 只发布 `web` 的 `8080:80`；`api`、`db` 与 `qdrant` 没有任何宿主机端口，
+浏览器无法直达向量库或两类模型网关。
 
 ---
 
@@ -52,10 +58,16 @@ cp .env.example .env
 | `SEED_STUDENT_B1_PASSWORD` | 必填，1..72 UTF-8 字节 |
 | `PUBLIC_ORIGIN` | 浏览器入口来源，例如 `http://localhost:8080`；POST 同源校验的比对基准 |
 | `DEV_PUBLIC_ORIGIN` | 可选；仅本地 HTTP 开发时填写 `http://localhost:5173`，生产保持空值 |
-| `SESSION_COOKIE_SECURE` | 恰好为 `true` 或 `false`；生产 HTTPS 必须为 `true` |
+| `QDRANT_URL` | 可选；默认 `http://qdrant:6333`，容器内按服务名访问 |
+| `QDRANT_COLLECTION` | 可选；默认 `campusclaw_chunks`。切换嵌入模型时可指定新集合，填充向量后再切换 API，旧集合保留供回退 |
+| `EMBEDDING_BASE_URL` | 必填；兼容 OpenAI `POST {BASE_URL}/embeddings` 的网关地址 |
+| `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` | 必填；嵌入模型名与密钥，仅 API 读取 |
+| `EMBEDDING_DIMENSIONS` | 必填；必须等于嵌入模型实际返回的宽度，不一致时 API 启动失败而不是混写不同维度向量 |
+| `CHAT_BASE_URL` | 必填；兼容 OpenAI `POST {BASE_URL}/chat/completions` 的网关地址 |
+| `CHAT_MODEL` / `CHAT_API_KEY` | 必填；对话模型名与密钥，仅 API 读取 |
 
 缺少任一必填变量时，`docker compose up` 会直接报出缺少的变量名并停止启动，
-错误信息中不含任何值。
+错误信息中不含任何值。两类网关密钥不会出现在前端构建产物、浏览器响应或日志中。
 
 ### 2.2 启动
 
@@ -84,7 +96,7 @@ docker compose up --build
 ### 2.4 本地 Vite 开发
 
 先按 2.1 配置四个种子密码，并设置 `PUBLIC_ORIGIN=http://localhost:8080`、
-`SESSION_COOKIE_SECURE=false`、`DEV_PUBLIC_ORIGIN=http://localhost:5173`，再启动 Compose。
+Set PUBLIC_ORIGIN=http://localhost:8080 and DEV_PUBLIC_ORIGIN=http://localhost:5173 before starting Compose.
 另开终端运行：
 
 ```bash
@@ -107,14 +119,34 @@ JSON 429，并提示稍后重试。账号不存在和密码错误在未超限时
 
 | 方法 | 路径 | 成功 | 主要失败 |
 | --- | --- | --- | --- |
-| POST | `/api/login` | 200 `{user}` + Cookie | 401 凭证错误；400 JSON 非法；429 登录限流 |
-| POST | `/api/logout` | 204 | 401 未登录（并清 Cookie） |
+| POST | `/api/login` | 200 `{user,token,expires_at}`，不设置任何 Cookie | 401 invalid credentials; 400 invalid JSON; 429 rate limit |
+| POST | `/api/logout` | 204, revokes the session | 401 without a valid Bearer token |
 | GET | `/api/me` | 200 `User` | 401 |
 | GET | `/api/materials` | 200 `{materials:[]}` | 401 |
 | GET | `/api/materials/{id}` | 200 `{material,content}` | 401；无效 ID/跨班/不存在 404 |
 | GET | `/api/materials/{id}/file` | 200 原文件 | 401；无效 ID/跨班/不存在/文件缺失 404 |
 | POST | `/api/materials` | 201 `{material}` + `Location` | 见下 |
+| POST | `/api/search` | 200 `{query_vector_generated,message,hits:[]}` | 401；空 query/未知 mode 400；向量依赖不可用 503 |
+| POST | `/api/ask` | 200 `{answer,citations:[]}` | 401；空问题 400；检索或对话网关失败 503 |
+| POST | `/api/materials/{id}/reindex` | 200 `{index}` | 401；学生 403；非法切分参数 400；跨班/不存在 404 |
+| GET | `/api/materials/{id}/index` | 200 `{index}` | 401；学生 403；跨班/不存在 404 |
 | GET | `/health` | 200 `{"status":"ok"}` | 503 |
+
+检索与问答：
+
+- `mode` 取 `keyword`、`vector`、`hybrid`，缺省为 `hybrid`。`keyword` 只走 MySQL 全文索引，
+  不调用嵌入网关；`vector` 与 `hybrid` 需要向量库与嵌入网关。
+- 检索范围只取服务端会话中的 `class_id`：请求体、query 参数或 header 里的 `class_id`
+  一律忽略，跨班内容表现为 200、`hits=[]`，不以 403/404 暗示其存在。
+- 每条命中给出材料 ID 与标题、切片 ID 与序号、字符区间、偏移基准（`extracted`/`normalized`）、
+  取自 MySQL 的纯文本摘录，以及指向授权材料详情的 `source`。响应**不含**任何向量分量。
+- 无合格候选时返回 200、`hits=[]` 与固定文案「资料中未找到相关内容」，不用低相关度候选凑数。
+- `/api/ask` 只用最新一条问题做本班 hybrid 检索并取前 4 条；没有命中时直接返回固定文案与空
+  `citations`，**完全不调用对话模型**。客户端提交的 `system` 消息一律丢弃。
+- 向量库或网关不可用时，`keyword` 仍可用，`vector`/`hybrid`/`ask` 返回通用 503，
+  不降级为别的模式，也不泄露连接地址、密钥或跨班内容。
+
+登录鉴权只用 `Authorization: Bearer <token>`：浏览器把服务端签发的不透明 token 保存在 `localStorage`，**链路中没有任何 Cookie，也没有刷新接口**。页面刷新后由 `GET /api/me` 重新校验该 token；会话在登录后固定 24 小时过期，到期即 401，需要重新登录。迁移会清空旧版 Cookie 时期的会话行，因此切换后所有用户需重新登录一次。
 
 错误统一为 `{"error":{"code":"...","message":"..."}}`。`404` 固定 `not_found`，
 跨班与不存在使用完全相同的响应体；`401` 固定 `unauthorized`；`403` 固定 `forbidden`；登录限流 `429` 固定 `rate_limited`。
@@ -245,12 +277,12 @@ MSYS_NO_PATHCONV=1 docker run --rm --add-host=host.docker.internal:host-gateway 
 
 该程序只用标准库，逐个覆盖 AC01–AC15、AC19、AC21、AC25–AC31，输出每个编号的
 PASS/FAIL。它从不直接访问 API 容器或数据库，全部走与浏览器相同的 8080 入口与真实
-Cookie，因此同时覆盖认证、班级隔离、解析与网关。
+Bearer access tokens cover authentication, class isolation, parsing and the gateway.
 
 原始的数据库行数断言由 5.3 的 Go 套件在容器网络内完成（AC16–AC18、AC20、DA/MA 场景）；
 本入口通过可观察后果（列表长度不变、详情 404）验证同类事实。
 
-### 5.6 浏览器端到端（WE01–WE06、AC23/AC32）
+### 5.6 浏览器端到端（WE01–WE06、WE10–WE13、AC23/AC32）
 
 需要一个真实浏览器，因此该套件在本机运行。它**没有任何 npm 依赖**：
 `cdp.mjs` 是一个很小的 DevTools 协议客户端，直接驱动 Chromium。
@@ -281,18 +313,44 @@ node check.mjs
 登录页、教师上传后列表刷新、学生看不到上传入口、篡改 `localStorage` 不改变身份、
 材料中的 `<script>` 只按文本显示而不执行、登出后刷新仍未登录。
 
+检索相关的场景：`WE13` 教师可见切分策略与索引状态、按 hierarchy 重建后仍可检索；
+`WE10` 学生三种方式检索、命中可打开、空输入提示、无依据固定文案；`WE12` 回答编号与
+出处一一对应且可点选；`WE11` 在 390px 视口下检索与问答可用且不产生横向滚动。
+
 输出每个编号的 PASS/FAIL，例如：
 
 ```text
 WE02 PASS  未登录进入登录页；错误密码留在登录页；正确凭证进入材料页
 ...
 AC23 PASS  浏览器只访问 localhost:8080 这一个来源
-7 checks, 0 failed
+11 checks, 0 failed
 ```
 
-本次新增场景的逐项执行结果见 [验收记录](tests/evidence/add-auth-class-materials-2026-09-28.md)。
+本次新增场景的逐项执行结果见 [验收记录](tests/evidence/add-traceable-vector-retrieval-2026-09-30.md)。
 
-### 5.7 前端
+### 5.7 模型网关替身（仅验收）
+
+`tests/gateway` 是一个确定性的、兼容 OpenAI 的嵌入与对话网关替身，**不参与产品运行**，
+只为在没有真实模型服务时也能端到端验收向量、混合与问答路径。它用「概念词袋」产生向量，
+因此「同义改写能被语义路径命中、而关键字路径命中不了」可以被真实地验证。
+
+```bash
+docker build -t campusclaw-zwh-gateway:latest tests/gateway
+docker run -d --name campusclaw-zwh-stub-gateway -p 127.0.0.1:11434:8080 campusclaw-zwh-gateway:latest
+```
+
+把 `.env` 的 `EMBEDDING_BASE_URL` / `CHAT_BASE_URL` 指向 `http://host.docker.internal:11434/v1`，
+`EMBEDDING_DIMENSIONS` 设为 1536 即可。换成真实网关地址、模型名与密钥后，代码无需改动。
+
+验收建议使用独立的 Compose 项目（独立数据卷、干净数据库）：
+
+```bash
+DEV_PUBLIC_ORIGIN= PUBLIC_ORIGIN=http://localhost:8090 \
+docker compose -p campusclaw-zwh-acc -f compose.yaml \
+  -f tests/acceptance/override-8090.yaml up -d --build
+```
+
+### 5.8 前端
 
 ```bash
 cd frontend
@@ -305,10 +363,11 @@ npm run build
 
 ## 6. 数据持久化、备份与回退
 
-两个命名卷保存全部状态：
+三个命名卷保存全部状态：
 
-- `campusclaw-zwh_db_data` → MySQL 数据目录
+- `campusclaw-zwh_db_data` → MySQL 数据目录（材料、原文本、切片与索引状态）
 - `campusclaw-zwh_uploads` → 私有原文件，按班级 ID 分目录
+- `campusclaw-zwh_qdrant_data` → 向量库数据
 
 备份（应用停止后执行更稳妥）：
 
@@ -318,19 +377,23 @@ docker run --rm -v campusclaw-zwh_db_data:/data -v "$PWD:/backup" alpine \
   tar czf /backup/db_data.tgz -C /data .
 docker run --rm -v campusclaw-zwh_uploads:/data -v "$PWD:/backup" alpine \
   tar czf /backup/uploads.tgz -C /data .
+docker run --rm -v campusclaw-zwh_qdrant_data:/data -v "$PWD:/backup" alpine \
+  tar czf /backup/qdrant_data.tgz -C /data .
 docker compose start
 ```
 
 **数据库与文件必须来自同一时点**：只恢复其中一个会得到引用不存在文件（或反之）的记录。
+向量卷例外：它丢失只意味着需要重建索引，MySQL 中的切片正文仍然完整——
+删除向量卷后重新启动，API 会自动为所有材料重新建立索引。
 
-回退应用版本时保留两个卷，重新构建镜像即可；不要通过删库或删卷来"恢复"。
+回退应用版本时保留三个卷，重新构建镜像即可；不要通过删库或删卷来"恢复"。
 正常停止一律使用 `docker compose down`，**不要使用 `-v`**。
 
 ---
 
 ## 7. 生产部署注意事项
 
-- 必须使用 HTTPS，并将 `SESSION_COOKIE_SECURE` 设为 `true`；本地 HTTP 开发才设为 `false`。
+- Production must use HTTPS: the Bearer token is sent on every request and is protected only by transport encryption. Local HTTP development is supported.
 - `PUBLIC_ORIGIN` 必须精确等于浏览器实际访问的来源（含 scheme 与端口，无路径、无末尾斜杠）。
   POST 请求按此校验 `Origin`/`Referer`，不匹配即 403。
 - 生产环境将 `DEV_PUBLIC_ORIGIN` 留空；非本地组合会在 API 启动时被拒绝。
@@ -368,15 +431,22 @@ SELECT id, class_id, stored_filename FROM materials WHERE stored_filename = '<�
 
 ```text
 backend/
-  cmd/api/           进程入口：配置校验、解析器检查、迁移、seed、HTTP 服务
-  internal/          认证、班级隔离、材料、解析、健康检查、路由装配
+  cmd/api/           进程入口：配置校验、解析器检查、迁移、seed、集合准备、补索引、HTTP 服务
+  internal/
+    auth/            登录、会话、班级隔离
+    materials/       材料上传、解析、读取、下载
+    chunking/        三种切分策略、参数校验、Unicode 字符区间
+    retrieval/       向量库与网关客户端、索引生命周期、检索与问答、检索接口
+    config/ db/ httpapi/ httpx/ seed/ health/   配置、连接、路由与共享契约
   migrations/        有序 SQL 迁移（编译进二进制）
   tests/             数据库集成套件 + 测试运行镜像
 frontend/            React 18 + TypeScript + Vite 前端
 deploy/nginx.conf    唯一的浏览器入口配置
 tests/acceptance/    HTTP 验收入口（仅标准库，独立模块）
-tests/browser/       浏览器端到端套件（Playwright）
-compose.yaml         web / api / db 三个服务
+tests/browser/       浏览器端到端套件（无 npm 依赖的 DevTools 协议客户端）
+tests/gateway/       验收用的确定性模型网关替身（不参与产品运行）
+tests/evidence/      每次变更的可复核验收输出
+compose.yaml         web / api / db / qdrant 四个服务
 .env.example         空值配置模板
 ```
 
@@ -384,7 +454,10 @@ compose.yaml         web / api / db 三个服务
 
 ## 10. 本迭代不包含
 
-RAG 查询、Embedding、向量库、文本切片、AI 问答、Agent、作业发布/提交/批改、搜索、
-用户注册、找回密码、班级与用户管理后台、材料编辑与删除、OCR、旧版 `.doc`、`.docm`、
-文档密码解密、版式还原、浏览器内 PDF/Word 预览，以及 DOCX 页眉页脚/批注/修订历史/
-文本框/嵌入对象解析。知识库每份材料只保存一条提取文本，不做切片。
+流式长对话、重排序器（reranker）、OCR、跨班共享、客户端直连向量库或模型网关、
+把向量分量暴露给浏览器、Agent、作业发布/提交/批改、用户注册、找回密码、
+班级与用户管理后台、材料编辑与删除、旧版 `.doc`、`.docm`、文档密码解密、版式还原、
+浏览器内 PDF/Word 预览，以及 DOCX 页眉页脚/批注/修订历史/文本框/嵌入对象解析。
+
+检索侧的已知边界：ngram 分词固定为 2 字，单个汉字的关键字查询可能命中不到；
+预处理后的字符区间属于预处理文本，不冒充原始 PDF/DOCX 页码或文件字节偏移。

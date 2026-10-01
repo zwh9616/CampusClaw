@@ -25,6 +25,7 @@ func (r *runner) execute() error {
 	}
 
 	teacherB := r.checkTeacherBLogin()
+	r.checkCookieIsNotACredential(teacher)
 
 	r.checkAuthenticatedAPIs(studentB)
 	r.checkRejectedLogins()
@@ -47,6 +48,11 @@ func (r *runner) execute() error {
 	pdfID, docxID := r.checkDocumentUploads(teacher, studentA)
 	r.checkDocumentFailures(teacher)
 	r.checkDocumentAccessControl(studentA, studentB, pdfID, docxID)
+
+	// Retrieval runs before the rate-limit check, which deliberately exhausts
+	// the login limiter and would starve anything that needs a new session.
+	r.checkRetrieval(teacher, studentA, teacherB, studentB)
+
 	r.checkLoginRateLimit()
 
 	return nil
@@ -1110,4 +1116,46 @@ func (r *runner) checkLoginRateLimit() {
 	} else {
 		r.check(health.StatusCode == http.StatusOK, "login limit affected /health")
 	}
+}
+
+// AU07: the session is a Bearer token and nothing else. A live token replayed
+// as a cookie must not authenticate, and no response in the flow hands one out.
+func (r *runner) checkCookieIsNotACredential(session *browser) {
+	r.begin("AU07", "Cookie 不参与鉴权，链路不设置任何 Cookie")
+	if session == nil {
+		r.fail("teacher session was not established")
+		return
+	}
+
+	// A second client presents the live token only as a cookie.
+	probe, err := newBrowser("cookie-only", r.baseURL)
+	if err != nil {
+		r.fail("cookie-only client: %v", err)
+		return
+	}
+	request, err := http.NewRequest(http.MethodGet, r.baseURL+"/api/me", nil)
+	if err != nil {
+		r.fail("cookie-only request: %v", err)
+		return
+	}
+	request.AddCookie(&http.Cookie{Name: "campusclaw_session", Value: session.accessToken})
+	request.AddCookie(&http.Cookie{Name: "campusclaw_refresh", Value: session.accessToken})
+
+	response, _, err := probe.do(request)
+	if err != nil {
+		r.fail("cookie-only request: %v", err)
+		return
+	}
+	r.check(response.StatusCode == http.StatusUnauthorized,
+		"a Cookie authorized /api/me: status = %d, want 401", response.StatusCode)
+
+	// The Bearer header still works, and the exchange sets no cookie.
+	me, _, err := session.get("/api/me")
+	if err != nil {
+		r.fail("Bearer /api/me: %v", err)
+		return
+	}
+	r.check(me.StatusCode == http.StatusOK, "Bearer /api/me status = %d", me.StatusCode)
+	r.check(len(me.Cookies()) == 0 && me.Header.Get("Set-Cookie") == "",
+		"/api/me set a cookie: %q", me.Header.Get("Set-Cookie"))
 }

@@ -21,6 +21,9 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
+      # Pinned so the keyword index and the queries that use it cannot drift
+      # apart: the value is read once at startup and is not settable per session.
+      - --ngram-token-size=2
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
@@ -33,6 +36,18 @@ services:
       start_period: 30s
     # Deliberately no ports: the database is reachable only on the internal
     # network, by service name.
+
+  # The vector index. Chunk text stays in MySQL; only the vectors and the five
+  # identifying fields live here, so a citation is never reconstructed from this
+  # store alone.
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # Deliberately no ports: only the API container may reach the collection.
+    # The image ships no healthcheck, so readiness is proven by the API's own
+    # collection preparation instead.
 
   api:
     build:
@@ -50,6 +65,20 @@ services:
       MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
 
+      # The vector store is reached by service name and never published.
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-campusclaw_chunks}
+
+      # Server-side model gateways. The keys live here and nowhere else: the
+      # browser only ever talks to this API's /api routes.
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:?EMBEDDING_BASE_URL is required}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:?EMBEDDING_MODEL is required}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:?EMBEDDING_DIMENSIONS is required}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?EMBEDDING_API_KEY is required}
+      CHAT_BASE_URL: ${CHAT_BASE_URL:?CHAT_BASE_URL is required}
+      CHAT_MODEL: ${CHAT_MODEL:?CHAT_MODEL is required}
+      CHAT_API_KEY: ${CHAT_API_KEY:?CHAT_API_KEY is required}
+
       SEED_TEACHER_A_PASSWORD: ${SEED_TEACHER_A_PASSWORD:?SEED_TEACHER_A_PASSWORD is required}
       SEED_STUDENT_A1_PASSWORD: ${SEED_STUDENT_A1_PASSWORD:?SEED_STUDENT_A1_PASSWORD is required}
       SEED_TEACHER_B_PASSWORD: ${SEED_TEACHER_B_PASSWORD:?SEED_TEACHER_B_PASSWORD is required}
@@ -57,13 +86,16 @@ services:
 
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}
       DEV_PUBLIC_ORIGIN: ${DEV_PUBLIC_ORIGIN:-}
-      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:?SESSION_COOKIE_SECURE is required}
     volumes:
       - uploads:/uploads
     depends_on:
       db:
         # Migrations and the seed run only once the database is answering.
         condition: service_healthy
+      qdrant:
+        # Started, not healthy: the image publishes no healthcheck, and the API
+        # prepares the collection itself once the store answers.
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8081/health"]
       interval: 5s
@@ -96,3 +128,6 @@ services:
 volumes:
   db_data:
   uploads:
+  # The vectors outlive a container rebuild; losing them only costs a reindex,
+  # because the chunk text they point at is still in MySQL.
+  qdrant_data:

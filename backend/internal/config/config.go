@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,6 +24,13 @@ const MaxPasswordBytes = 72
 const (
 	defaultPort      = "8081"
 	defaultUploadDir = "/uploads"
+	// defaultQdrantURL is the Compose service address. Nothing outside the
+	// Compose network can reach it, so the default is safe to ship.
+	defaultQdrantURL        = "http://qdrant:6333"
+	defaultQdrantCollection = "campusclaw_chunks"
+	// maxEmbeddingDimensions bounds the collection size, so a mistyped
+	// dimension fails at startup rather than at the first vector write.
+	maxEmbeddingDimensions = 8192
 )
 
 // Config is the fully validated runtime configuration.
@@ -30,11 +39,37 @@ type Config struct {
 	UploadDir       string
 	PublicOrigin    *url.URL
 	DevPublicOrigin *url.URL
-	// SessionCookieSecure must be true wherever the browser reaches the API
-	// over HTTPS; it stays false for local HTTP development.
-	SessionCookieSecure bool
-	MySQL               MySQL
-	Seed                Seed
+	MySQL           MySQL
+	Seed            Seed
+	Qdrant          Qdrant
+	Embedding       EmbeddingGateway
+	Chat            ChatGateway
+}
+
+// Qdrant locates the private vector store.
+type Qdrant struct {
+	URL        *url.URL
+	Collection string
+}
+
+// EmbeddingGateway describes the OpenAI-compatible embedding endpoint the API
+// calls to turn text into vectors.
+//
+// APIKey is a server-side secret: it is handed to the gateway client and never
+// logged, echoed in an error, or encoded into a response.
+type EmbeddingGateway struct {
+	BaseURL    *url.URL
+	Model      string
+	Dimensions int
+	APIKey     string
+}
+
+// ChatGateway describes the OpenAI-compatible chat endpoint that writes the
+// short answer. Its key is held to the same rule as the embedding one.
+type ChatGateway struct {
+	BaseURL *url.URL
+	Model   string
+	APIKey  string
 }
 
 // MySQL holds the database connection settings used by the API.
@@ -115,6 +150,10 @@ func Load() (*Config, error) {
 		"SEED_STUDENT_A1_PASSWORD": cfg.Seed.StudentA1Password,
 		"SEED_TEACHER_B_PASSWORD":  cfg.Seed.TeacherBPassword,
 		"SEED_STUDENT_B1_PASSWORD": cfg.Seed.StudentB1Password,
+		"EMBEDDING_MODEL":          os.Getenv("EMBEDDING_MODEL"),
+		"EMBEDDING_API_KEY":        os.Getenv("EMBEDDING_API_KEY"),
+		"CHAT_MODEL":               os.Getenv("CHAT_MODEL"),
+		"CHAT_API_KEY":             os.Getenv("CHAT_API_KEY"),
 	})
 
 	for _, password := range []struct {
@@ -137,19 +176,51 @@ func Load() (*Config, error) {
 	}
 	cfg.PublicOrigin = origin
 
-	secure, err := parseBool("SESSION_COOKIE_SECURE", os.Getenv("SESSION_COOKIE_SECURE"))
-	if err != nil {
-		problems = append(problems, err.Error())
-	}
-	cfg.SessionCookieSecure = secure
-
 	if devOrigin := os.Getenv("DEV_PUBLIC_ORIGIN"); devOrigin != "" {
 		if devOrigin != "http://localhost:5173" || cfg.PublicOrigin == nil ||
-			cfg.PublicOrigin.String() != "http://localhost:8080" || cfg.SessionCookieSecure {
+			cfg.PublicOrigin.String() != "http://localhost:8080" {
 			problems = append(problems, "DEV_PUBLIC_ORIGIN is only allowed for local HTTP development")
 		} else {
 			cfg.DevPublicOrigin, _ = url.Parse(devOrigin)
 		}
+	}
+
+	qdrantURL, err := parseGatewayBaseURL(valueOr(os.Getenv("QDRANT_URL"), defaultQdrantURL))
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("QDRANT_URL %s", err))
+	}
+	collection := valueOr(os.Getenv("QDRANT_COLLECTION"), defaultQdrantCollection)
+	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`).MatchString(collection) {
+		problems = append(problems, "QDRANT_COLLECTION must use 1..64 letters, digits, underscores or hyphens")
+	}
+	cfg.Qdrant = Qdrant{URL: qdrantURL, Collection: collection}
+
+	embeddingURL, err := parseGatewayBaseURL(os.Getenv("EMBEDDING_BASE_URL"))
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("EMBEDDING_BASE_URL %s", err))
+	}
+
+	dimensions, err := parseDimensions(os.Getenv("EMBEDDING_DIMENSIONS"))
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("EMBEDDING_DIMENSIONS %s", err))
+	}
+
+	cfg.Embedding = EmbeddingGateway{
+		BaseURL:    embeddingURL,
+		Model:      os.Getenv("EMBEDDING_MODEL"),
+		Dimensions: dimensions,
+		APIKey:     os.Getenv("EMBEDDING_API_KEY"),
+	}
+
+	chatURL, err := parseGatewayBaseURL(os.Getenv("CHAT_BASE_URL"))
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("CHAT_BASE_URL %s", err))
+	}
+
+	cfg.Chat = ChatGateway{
+		BaseURL: chatURL,
+		Model:   os.Getenv("CHAT_MODEL"),
+		APIKey:  os.Getenv("CHAT_API_KEY"),
 	}
 
 	if len(problems) > 0 {
@@ -204,18 +275,52 @@ func parsePublicOrigin(raw string) (*url.URL, error) {
 	return parsed, nil
 }
 
-// parseBool accepts only the two literals documented in .env.example. Being
-// strict here means a typo like "yes" or "1" fails the boot loudly instead of
-// silently leaving cookies without the Secure attribute in production.
-func parseBool(name, raw string) (bool, error) {
-	switch raw {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	default:
-		return false, fmt.Errorf("%s must be exactly true or false", name)
+// parseGatewayBaseURL accepts an absolute http(s) URL for a service the API
+// calls. Unlike PUBLIC_ORIGIN it may carry a path, because an
+// OpenAI-compatible gateway is commonly mounted under /v1.
+func parseGatewayBaseURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, errors.New("must not be empty")
 	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, errors.New("must be a valid absolute URL")
+	}
+
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("must use http or https")
+	}
+
+	if parsed.Host == "" {
+		return nil, errors.New("must include a host")
+	}
+
+	if parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return nil, errors.New("must not include credentials, query or fragment")
+	}
+
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	return parsed, nil
+}
+
+// parseDimensions reads the embedding width as a whole number. The message
+// names the variable and the bounds, never the value that was supplied.
+func parseDimensions(raw string) (int, error) {
+	if raw == "" {
+		return 0, errors.New("must not be empty")
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, errors.New("must be a whole number")
+	}
+
+	if value < 1 || value > maxEmbeddingDimensions {
+		return 0, fmt.Errorf("must be between 1 and %d", maxEmbeddingDimensions)
+	}
+
+	return value, nil
 }
 
 // requireAll reports every empty variable at once so one failed start reveals

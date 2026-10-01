@@ -23,7 +23,7 @@ func (e *Env) postJSON(t *testing.T, path, body string, cookie *http.Cookie, hea
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	if cookie != nil {
-		request.AddCookie(cookie)
+		request.Header.Set("Authorization", "Bearer "+cookie.Value)
 	}
 	for name, value := range headers {
 		request.Header[name] = []string{value}
@@ -38,7 +38,7 @@ func (e *Env) get(t *testing.T, path string, cookie *http.Cookie) *httptest.Resp
 
 	request := httptest.NewRequest(http.MethodGet, path, nil)
 	if cookie != nil {
-		request.AddCookie(cookie)
+		request.Header.Set("Authorization", "Bearer "+cookie.Value)
 	}
 
 	return e.Do(t, request)
@@ -100,7 +100,9 @@ func TestLoginSucceedsForSeededAccounts(t *testing.T) {
 		}
 
 		var response struct {
-			User json.RawMessage `json:"user"`
+			Token     string          `json:"token"`
+			ExpiresAt time.Time       `json:"expires_at"`
+			User      json.RawMessage `json:"user"`
 		}
 		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 			t.Errorf("%s: decode body: %v", username, err)
@@ -119,14 +121,15 @@ func TestLoginSucceedsForSeededAccounts(t *testing.T) {
 			t.Errorf("%s: class = %q, want %q", username, user.ClassName, want.className)
 		}
 
-		cookies := recorder.Result().Cookies()
-		if len(cookies) != 1 {
-			t.Errorf("%s: got %d cookies, want 1", username, len(cookies))
+		if cookies := recorder.Result().Cookies(); len(cookies) != 0 {
+			t.Errorf("%s: login set %d cookies, want none", username, len(cookies))
 		}
 
-		// The token must never appear in the response body.
-		if strings.Contains(recorder.Body.String(), "session") || strings.Contains(recorder.Body.String(), cookies[0].Value) {
-			t.Errorf("%s: response body exposes session material: %s", username, recorder.Body.String())
+		if response.Token == "" || response.ExpiresAt.Before(time.Now()) {
+			t.Errorf("%s: missing access token or expiry", username)
+		}
+		if header := recorder.Header().Get("Set-Cookie"); header != "" {
+			t.Errorf("%s: login sent Set-Cookie: %q", username, header)
 		}
 	}
 }
@@ -278,9 +281,9 @@ func TestProtectedEndpointsRequireAValidSession(t *testing.T) {
 	}
 
 	credentials := map[string]*http.Cookie{
-		"no cookie":       nil,
-		"forged token":    {Name: "campusclaw_session", Value: "forged-token-value"},
-		"expired session": {Name: "campusclaw_session", Value: expired.Value},
+		"no credential":   nil,
+		"forged token":    {Value: "forged-token-value"},
+		"expired session": {Value: expired.Value},
 		"valid session":   valid,
 	}
 
@@ -297,7 +300,7 @@ func TestProtectedEndpointsRequireAValidSession(t *testing.T) {
 		for _, target := range requests {
 			request := httptest.NewRequest(target.method, target.path, nil)
 			if cookie != nil {
-				request.AddCookie(cookie)
+				request.Header.Set("Authorization", "Bearer "+cookie.Value)
 			}
 
 			recorder := env.Do(t, request)
@@ -308,9 +311,24 @@ func TestProtectedEndpointsRequireAValidSession(t *testing.T) {
 			}
 		}
 	}
+
+	// AU07: a cookie is not a credential. Even a live token value presented as
+	// a cookie must be refused, whatever the cookie is called.
+	for _, target := range requests {
+		request := httptest.NewRequest(target.method, target.path, nil)
+		request.AddCookie(&http.Cookie{Name: "access_token", Value: valid.Value})
+		request.AddCookie(&http.Cookie{Name: "campusclaw_session", Value: valid.Value})
+		request.AddCookie(&http.Cookie{Name: "campusclaw_refresh", Value: valid.Value})
+
+		if recorder := env.Do(t, request); recorder.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s with cookies only: status = %d, want 401",
+				target.method, target.path, recorder.Code)
+		}
+	}
 }
 
-// AU06: the stored value is the SHA-256 of the cookie token, never the token.
+// AU06: the stored value is the SHA-256 of the presented Bearer token, never
+// the token itself.
 func TestSessionStoresOnlyTheTokenDigest(t *testing.T) {
 	env := NewEnv(t)
 	env.Seed(t)
@@ -393,7 +411,7 @@ func TestExpiredSessionIsRejectedWithoutCleanup(t *testing.T) {
 	}
 
 	// The row is deliberately left in place.
-	if recorder := env.get(t, "/api/me", &http.Cookie{Name: "campusclaw_session", Value: token.Value}); recorder.Code != http.StatusUnauthorized {
+	if recorder := env.get(t, "/api/me", &http.Cookie{Name: "access_token", Value: token.Value}); recorder.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 for an expired session", recorder.Code)
 	}
 }
@@ -415,9 +433,11 @@ func TestLogoutRevokesTheSession(t *testing.T) {
 		t.Errorf("logout body = %q, want empty", body)
 	}
 
-	cleared := recorder.Result().Cookies()
-	if len(cleared) != 1 || cleared[0].MaxAge != -1 {
-		t.Errorf("logout did not expire the cookie: %v", cleared)
+	if cookies := recorder.Result().Cookies(); len(cookies) != 0 {
+		t.Errorf("logout set %d cookies, want none", len(cookies))
+	}
+	if header := recorder.Header().Get("Set-Cookie"); header != "" {
+		t.Errorf("logout sent Set-Cookie: %q", header)
 	}
 
 	// Replaying the saved token must fail: this is the whole point of a
@@ -431,23 +451,19 @@ func TestLogoutRevokesTheSession(t *testing.T) {
 	}
 }
 
-// Logging out with a dead session answers 401 and still clears the cookie.
-func TestLogoutWithInvalidSessionClearsCookie(t *testing.T) {
+// Logging out with a dead session answers 401 and touches no cookie.
+func TestLogoutWithInvalidSessionLeavesNoCookie(t *testing.T) {
 	env := NewEnv(t)
 	env.Seed(t)
 
-	recorder := env.postJSON(t, "/api/logout", "", &http.Cookie{
-		Name:  "campusclaw_session",
-		Value: "not-a-real-token",
-	}, nil)
+	recorder := env.postJSON(t, "/api/logout", "", &http.Cookie{Value: "not-a-real-token"}, nil)
 
 	if recorder.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", recorder.Code)
 	}
 
-	cleared := recorder.Result().Cookies()
-	if len(cleared) != 1 || cleared[0].MaxAge != -1 {
-		t.Errorf("cookie was not cleared: %v", cleared)
+	if len(recorder.Result().Cookies()) != 0 {
+		t.Error("an invalid Bearer token must not set a cookie")
 	}
 }
 
@@ -469,7 +485,7 @@ func TestAuthenticationPrecedesSameOriginCheck(t *testing.T) {
 	student := env.Login(t, "student_a1", env.Password(t, "student_a1"))
 
 	request = httptest.NewRequest(http.MethodPost, "/api/materials", nil)
-	request.AddCookie(student)
+	request.Header.Set("Authorization", "Bearer "+student.Value)
 	request.Header.Set("Origin", "http://evil.example")
 
 	if recorder := env.Do(t, request); recorder.Code != http.StatusForbidden {
@@ -490,18 +506,25 @@ func TestAuthenticationResponsesAreNotCacheable(t *testing.T) {
 		t.Errorf("login Cache-Control = %q, want no-store", got)
 	}
 
-	cookie := loginRecorder.Result().Cookies()[0]
+	var login struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(loginRecorder.Body.Bytes(), &login); err != nil {
+		t.Fatal(err)
+	}
+	if cookies := loginRecorder.Result().Cookies(); len(cookies) != 0 {
+		t.Errorf("login set %d cookies, want none", len(cookies))
+	}
 
-	meRecorder := env.get(t, "/api/me", cookie)
+	meRecorder := env.get(t, "/api/me", &http.Cookie{Value: login.Token})
 	if got := meRecorder.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("me Cache-Control = %q, want no-store", got)
 	}
 
-	// AU01: the cookie carries no role or class claim.
-	serialised := cookie.String()
-	for _, claim := range []string{"role", "class_id", "user_id"} {
-		if strings.Contains(strings.ToLower(serialised), claim) {
-			t.Errorf("cookie exposes %q: %s", claim, serialised)
+	// AUTH-02: the token is opaque randomness, not a readable identity claim.
+	for _, claim := range []string{"role", "class_id", "user_id", "teacher", "student"} {
+		if strings.Contains(strings.ToLower(login.Token), claim) {
+			t.Errorf("access token exposes %q: %s", claim, login.Token)
 		}
 	}
 }
@@ -514,7 +537,7 @@ func TestClientSideIdentityTamperingHasNoEffect(t *testing.T) {
 	student := env.Login(t, "student_a1", env.Password(t, "student_a1"))
 
 	request := httptest.NewRequest(http.MethodGet, "/api/me?role=teacher&class_id=2", nil)
-	request.AddCookie(student)
+	request.Header.Set("Authorization", "Bearer "+student.Value)
 	request.AddCookie(&http.Cookie{Name: "role", Value: "teacher"})
 	request.AddCookie(&http.Cookie{Name: "class_id", Value: "2"})
 

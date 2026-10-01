@@ -1,9 +1,9 @@
 // Browser end-to-end checks for WE01-WE06 and AC23/AC32.
 //
 // The scenarios share a single browser page and separate themselves by clearing
-// cookies and reloading, rather than opening a fresh browser context each time.
-// That keeps the run stable and mirrors what a user actually does: log out, log
-// in as somebody else, reload.
+// the stored token and reloading, rather than opening a fresh browser context
+// each time. That keeps the run stable and mirrors what a user actually does:
+// log out, log in as somebody else, reload.
 //
 // Every URL the browser requests is recorded, so the run doubles as the AC23
 // evidence that nothing reaches the API or database containers directly.
@@ -91,8 +91,15 @@ async function paceLogin() {
   nextLoginAt = Date.now() + 7_000
 }
 
-/** signOut clears the session cookie and reloads onto the login page. */
+/**
+ * signOut drops the stored token and any leftover cookie.
+ *
+ * The very first call runs while the page is still on about:blank, where
+ * localStorage is unreachable and there is nothing to clear — hence the
+ * deliberate swallow. The caller's navigation produces the anonymous view.
+ */
 async function signOut(page) {
+  await page.evaluate('localStorage.clear()').catch(() => {})
   await page.send('Network.clearBrowserCookies')
 }
 
@@ -156,9 +163,19 @@ async function checkLoginFlow(page) {
 }
 
 async function checkSessionRestore(page) {
-  begin('WE01', '刷新后由 GET /api/me 恢复登录状态')
+  begin('WE01', '刷新后由 GET /api/me 恢复登录状态，且全程无 Cookie')
 
   await signIn(page, 'teacher_a')
+
+  // The credential lives in localStorage and nowhere else: the browser holds no
+  // cookie at all, and even the page itself cannot read one.
+  const { cookies } = await page.send('Network.getCookies', { urls: [BASE_ORIGIN] })
+  check(cookies.length === 0, `the browser holds ${cookies.length} cookie(s): ${JSON.stringify(cookies)}`)
+  check((await page.evaluate('document.cookie')) === '', 'document.cookie is not empty')
+
+  const stored = await page.evaluate('localStorage.getItem("campusclaw.access_token")')
+  check(typeof stored === 'string' && stored.length > 0, 'the access token was not stored in localStorage')
+
   await page.reload()
   await page.waitForSelector('header.bar', { timeoutMs: 15_000 })
 
@@ -193,11 +210,20 @@ async function checkTeacherUpload(page, fixtures) {
   const shown = await page.textContent('.content')
   check(shown.includes(note), `detail panel shows ${JSON.stringify(shown)}, want the uploaded text`)
 
-  const href = await page.attribute('.materials li:nth-child(1) a', 'href')
-  check(
-    /^\/api\/materials\/\d+\/file$/.test(href ?? ''),
-    `download link ${JSON.stringify(href)} does not point at the authenticated API`,
-  )
+  // The row's actions are named rather than counted: a teacher also gets the
+  // index control, and the point of this check is that viewing and downloading
+  // are authenticated controls, not how many there are.
+  const actions = await page.evaluate(`
+    [...document.querySelectorAll('.materials li:nth-child(1) .material-actions button')]
+      .map((button) => button.textContent.trim())
+  `)
+  check(actions.includes('查看'), `the material row has no 查看 control: ${JSON.stringify(actions)}`)
+  check(actions.includes('下载'), `the material row has no 下载 control: ${JSON.stringify(actions)}`)
+
+  await page.evaluate(`
+    [...document.querySelectorAll('.materials li:nth-child(1) .material-actions button')]
+      .find((button) => button.textContent.trim() === '下载')?.click()
+  `)
 }
 
 async function checkStudentView(page, fixtures) {
@@ -317,6 +343,226 @@ function checkSingleOrigin(page) {
   check(requests.length > 0, 'no requests were recorded, so the origin assertion is vacuous')
 }
 
+// ---------------------------------------------------------- retrieval ------
+
+/** selectOption drives a <select> the way a user's change event does. */
+async function selectOption(page, selector, value) {
+  await page.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)})
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+    setter.call(element, ${JSON.stringify(value)})
+    element.dispatchEvent(new window.Event('change', { bubbles: true }))
+  })()`)
+}
+
+/**
+ * setInputValue changes an input through the native setter and a bubbling
+ * input event, which is what React listens for. Assigning .value directly would
+ * update the DOM but leave the component's state — and therefore the next
+ * request — unchanged.
+ */
+async function setInputValue(page, selector, value) {
+  await page.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)})
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    setter.call(element, ${JSON.stringify(value)})
+    element.dispatchEvent(new window.Event('input', { bubbles: true }))
+  })()`)
+}
+
+/**
+ * The material the retrieval scenarios search for. It contains the term the
+ * keyword path matches and the concept the vector path matches, so one fixture
+ * exercises both.
+ */
+const RETRIEVAL_NOTE = '向量检索给出了可以核对的出处。'
+const RETRIEVAL_TERM = '向量检索'
+
+async function checkTeacherIndexControls(page, fixtures) {
+  begin('WE13', '教师可见切成策略与索引状态，重建后仍可检索')
+
+  await signIn(page, 'teacher_a')
+
+  const title = `检索讲义 ${timestamp()}`
+  await uploadThroughUi(page, fixtures, {
+    title,
+    filename: 'retrieval.md',
+    content: Buffer.from(`${RETRIEVAL_TERM}：${RETRIEVAL_NOTE}\n`, 'utf8'),
+  })
+
+  // The newest row is the fixture just uploaded.
+  await page.click('.materials li:nth-child(1) .index-panel button')
+  await page.waitForSelector('.index-status', { timeoutMs: 20_000 })
+
+  const status = await page.textContent('.index-status')
+  check(status.includes('已就绪'), `index status reads ${JSON.stringify(status)}, want 已就绪`)
+
+  check((await page.count(`#reindex-${await newestMaterialID(page)}-strategy`)) > 0,
+    'the rebuild control does not offer a split strategy')
+
+  // Rebuilding with an explicit strategy must leave the material searchable.
+  const strategyId = await page.evaluate(
+    'document.querySelector(".index-panel select[id$=\'-strategy\']")?.id ?? ""',
+  )
+  check(strategyId !== '', 'the rebuild form has no strategy select')
+  if (strategyId !== '') {
+    await selectOption(page, `#${strategyId}`, 'hierarchy')
+    await page.click('.index-body button:not(.secondary)')
+    // The panel already reported 已就绪 before the rebuild, so the wait has to
+    // be for the new strategy, not for readiness.
+    await page.waitForCondition(
+      'document.querySelector(".index-status")?.textContent.includes("hierarchy")',
+      { timeoutMs: 30_000, label: 'the rebuilt index to report the hierarchy strategy' },
+    )
+    check(
+      (await page.textContent('.index-status')).includes('已就绪'),
+      'the rebuilt index is not ready',
+    )
+  }
+}
+
+/** newestMaterialID reads the id the newest row's index panel is keyed by. */
+async function newestMaterialID(page) {
+  return page.evaluate(`
+    document.querySelector('.index-panel select[id$="-strategy"]')?.id.replace(/^reindex-/, '').replace(/-strategy$/, '') ?? ''
+  `)
+}
+
+async function checkRetrievalSearch(page) {
+  begin('WE10', '学生可用三种方式检索，出处可打开，空输入与无依据分别提示')
+
+  await signIn(page, 'student_a1')
+
+  check((await page.count('.index-panel')) === 0, 'the student was shown the teacher index controls')
+
+  await page.typeInto('#search-query', RETRIEVAL_TERM)
+  await page.click('form.search button[type="submit"]')
+  await page.waitForSelector('.hit', { timeoutMs: 30_000 })
+
+  const hit = await page.textContent('.hit')
+  check(hit.includes(RETRIEVAL_TERM), `the first hit does not contain the query term: ${JSON.stringify(hit)}`)
+  check(/切片 \d+/.test(hit), `the hit does not show its slice number: ${JSON.stringify(hit)}`)
+  check(/字符 \d+–\d+/.test(hit), `the hit does not show its character range: ${JSON.stringify(hit)}`)
+
+  // Searching by meaning, not by wording, through the vector mode.
+  await selectOption(page, '#search-mode', 'vector')
+  await page.click('form.search button[type="submit"]')
+  await page.waitForCondition(
+    'document.querySelectorAll(".hit").length > 0',
+    { timeoutMs: 30_000, label: 'a vector search result' },
+  )
+  check((await page.count('.hit')) > 0, 'a vector search returned nothing')
+
+  // Nothing on the page may be a raw vector component.
+  const body = await page.textContent('body')
+  check(!/\[(?:-?\d+\.\d+\s*,){3,}/.test(body), 'the page rendered something that looks like a raw vector')
+
+  // The top hit is whichever material ranks first, so the check is that the
+  // opened detail is the hit's own material — not that it is this test's
+  // fixture, which other material in the class may outrank.
+  const hitTitle = await page.evaluate(
+    'document.querySelector(".hit .hit-head strong")?.textContent ?? ""',
+  )
+  await page.click('.hit .hit-actions button')
+  await page.waitForSelector('.detail-card', { timeoutMs: 20_000 })
+
+  const openedTitle = await page.evaluate(
+    'document.querySelector(".detail-card h2")?.textContent ?? ""',
+  )
+  check(hitTitle !== '' && openedTitle === hitTitle,
+    `opening the hit showed ${JSON.stringify(openedTitle)}, want ${JSON.stringify(hitTitle)}`)
+  check((await page.evaluate(
+    'document.querySelector(".detail-card .content")?.textContent.length ?? 0',
+  )) > 0, 'the opened material shows no text')
+
+  // An empty query is a fixable mistake, not an empty result.
+  await setInputValue(page, '#search-query', '')
+  await page.click('form.search button[type="submit"]')
+  await page.waitForSelector('.retrieval-card .error', { timeoutMs: 15_000 })
+  check(
+    (await page.textContent('.retrieval-card .error')).includes('请输入'),
+    'an empty query did not ask for input',
+  )
+
+  // An unrelated query is an empty success, not an error.
+  await page.typeInto('#search-query', '天气预报和比分')
+  await page.click('form.search button[type="submit"]')
+  await page.waitForSelector('.retrieval-card .notice', { timeoutMs: 30_000 })
+  check(
+    (await page.textContent('.retrieval-card .notice')).includes('资料中未找到相关内容'),
+    'an unrelated query did not show the fixed notice',
+  )
+}
+
+async function checkAnswerCitations(page) {
+  begin('WE12', '回答中的编号与出处列表一一对应，可选中对应出处')
+
+  await signIn(page, 'student_a1')
+
+  await page.typeInto('#ask-question', `${RETRIEVAL_TERM}说了什么`)
+  await page.click('form.ask button[type="submit"]')
+  await page.waitForSelector('.answer-block', { timeoutMs: 40_000 })
+
+  const citations = await page.count('.citation')
+  check(citations > 0, 'an answer supported by the material came back with no citations')
+
+  const markers = await page.count('.citation-link')
+  check(markers > 0, 'no citation marker in the answer was linked to its source')
+
+  if (markers > 0) {
+    await page.click('.citation-link')
+    await page.waitForSelector('.citation-active', { timeoutMs: 10_000 })
+
+    const active = await page.textContent('.citation-active')
+    check(active.includes('[1]'), `the first marker selected ${JSON.stringify(active)}`)
+  }
+
+  // An unsupported question is answered without sources.
+  await page.typeInto('#ask-question', '这座城市的天气如何')
+  await page.click('form.ask button[type="submit"]')
+  await page.waitForCondition(
+    'document.querySelector(".answer")?.textContent.includes("资料中未找到相关内容")',
+    { timeoutMs: 40_000, label: 'the fixed no-evidence answer' },
+  )
+  check(
+    (await page.count('.citation-active')) === 0,
+    'an unsupported question left a citation selected',
+  )
+}
+
+async function checkNarrowViewport(page) {
+  begin('WE11', '390px 视口下检索与问答可用且不产生横向滚动')
+
+  await page.send('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  })
+
+  try {
+    await signIn(page, 'student_a1')
+    await page.typeInto('#search-query', RETRIEVAL_TERM)
+    await page.click('form.search button[type="submit"]')
+    await page.waitForSelector('.hit', { timeoutMs: 30_000 })
+
+    const layout = await page.evaluate(`({
+      scrollWidth: document.documentElement.scrollWidth,
+      innerWidth: window.innerWidth,
+      buttonVisible: (() => {
+        const button = document.querySelector('form.search button[type="submit"]')
+        return button !== null && button.getBoundingClientRect().width > 0
+      })(),
+    })`)
+
+    check(layout.scrollWidth <= layout.innerWidth + 1,
+      `the page scrolls horizontally: ${layout.scrollWidth} > ${layout.innerWidth}`)
+    check(layout.buttonVisible, 'the search button is not visible at 390px')
+  } finally {
+    await page.send('Emulation.clearDeviceMetricsOverride')
+  }
+}
+
 // ---------------------------------------------------------------- main ------
 
 async function main() {
@@ -330,6 +576,12 @@ async function main() {
     await checkSessionRestore(page)
     await checkTeacherUpload(page, fixtures)
     await checkStudentView(page, fixtures)
+    // Retrieval runs before the rate-limit case, which deliberately exhausts the
+    // login limiter and would leave every later sign-in refused.
+    await checkTeacherIndexControls(page, fixtures)
+    await checkRetrievalSearch(page)
+    await checkAnswerCitations(page)
+    await checkNarrowViewport(page)
     await checkLogout(page)
     if (BASE_ORIGIN === 'http://localhost:5173') {
       await checkDevOriginGuard()

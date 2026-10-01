@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"campusclaw/internal/auth"
+	"campusclaw/internal/chunking"
 	"campusclaw/internal/httpx"
 )
 
@@ -24,12 +25,24 @@ type Repository interface {
 	Create(ctx context.Context, input NewMaterial) (Material, error)
 }
 
+// Indexer starts the persistent index task for a material that has just been
+// committed.
+//
+// It is an interface so the upload path does not depend on how indexing is
+// implemented, and so a test can substitute a fake. Indexing happens after the
+// upload transaction has committed, and its failure never changes the upload's
+// outcome.
+type Indexer interface {
+	IndexMaterial(ctx context.Context, classID, materialID uint64, options chunking.Options) error
+}
+
 // Handlers serves the material endpoints.
 type Handlers struct {
 	repo       Repository
 	storage    *Storage
 	extractors map[string]Extractor
 	limiter    *ParseLimiter
+	indexer    Indexer
 }
 
 // NewHandlers builds the material handlers. extractors is keyed by lowercase
@@ -39,8 +52,15 @@ func NewHandlers(
 	storage *Storage,
 	extractors map[string]Extractor,
 	limiter *ParseLimiter,
+	indexer Indexer,
 ) *Handlers {
-	return &Handlers{repo: repo, storage: storage, extractors: extractors, limiter: limiter}
+	return &Handlers{
+		repo:       repo,
+		storage:    storage,
+		extractors: extractors,
+		limiter:    limiter,
+		indexer:    indexer,
+	}
 }
 
 type listResponse struct {

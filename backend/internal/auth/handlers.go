@@ -26,12 +26,11 @@ const maxLoginBody = 4 << 10
 type Handlers struct {
 	accounts *Accounts
 	sessions *Store
-	auth     *Authenticator
 }
 
 // NewHandlers wires the authentication endpoints together.
-func NewHandlers(accounts *Accounts, sessions *Store, authenticator *Authenticator) *Handlers {
-	return &Handlers{accounts: accounts, sessions: sessions, auth: authenticator}
+func NewHandlers(accounts *Accounts, sessions *Store) *Handlers {
+	return &Handlers{accounts: accounts, sessions: sessions}
 }
 
 type loginRequest struct {
@@ -40,7 +39,9 @@ type loginRequest struct {
 }
 
 type loginResponse struct {
-	User User `json:"user"`
+	User      User      `json:"user"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // Login authenticates a username and password and issues a fresh session.
@@ -100,24 +101,20 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Logging in replaces whatever session the browser arrived with, so a
-	// stolen or stale cookie stops working the moment the owner logs in again.
-	previousToken, _ := CookieToken(r)
-
-	token, err := h.sessions.Rotate(r.Context(), uint64(account.User.ID), previousToken, time.Now())
+	previousAccess, _ := BearerToken(r)
+	now := time.Now()
+	credentials, err := h.sessions.Issue(r.Context(), uint64(account.User.ID), previousAccess, now)
 	if err != nil {
 		log.Printf("auth: create session failed: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, httpx.CodeInternal)
 		return
 	}
-
-	SetSessionCookie(w, token, h.auth.Secure())
-
-	// The token is deliberately absent from the body.
-	httpx.WriteJSON(w, http.StatusOK, loginResponse{User: account.User})
+	httpx.WriteJSON(w, http.StatusOK, loginResponse{
+		User: account.User, Token: credentials.Access.Value, ExpiresAt: credentials.ExpiresAt,
+	})
 }
 
-// Me returns the identity resolved from the session cookie.
+// Me returns the identity resolved from the Bearer access token.
 func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	user, ok := UserFrom(r.Context())
 	if !ok {
@@ -128,25 +125,17 @@ func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, user)
 }
 
-// Logout deletes the server-side session and expires the cookie.
-//
-// It sits behind RequireUser, so an invalid or absent session has already been
-// answered with 401 and a cleared cookie by the time this runs.
+// Logout revokes the session behind the presented access token.
 func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
-	token, ok := CookieToken(r)
+	token, ok := BearerToken(r)
 	if !ok {
-		ClearSessionCookie(w, h.auth.Secure())
 		httpx.WriteError(w, http.StatusUnauthorized, httpx.CodeUnauthorized)
 		return
 	}
-
 	if err := h.sessions.Delete(r.Context(), token); err != nil {
 		log.Printf("auth: delete session failed: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, httpx.CodeInternal)
 		return
 	}
-
-	ClearSessionCookie(w, h.auth.Secure())
-
 	w.WriteHeader(http.StatusNoContent)
 }

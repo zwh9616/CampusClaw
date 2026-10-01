@@ -100,11 +100,20 @@ func TestSchemaColumnsAreNotNull(t *testing.T) {
 	env := NewEnv(t)
 
 	required := map[string][]string{
-		"classes":          {"id", "name", "created_at"},
-		"users":            {"id", "username", "password_hash", "role", "class_id", "created_at"},
-		"sessions":         {"id", "session_id", "user_id", "created_at", "expires_at"},
-		"materials":        {"id", "class_id", "uploaded_by", "title", "original_filename", "stored_filename", "content_type", "created_at"},
-		"knowledge_entries": {"id", "class_id", "material_id", "content", "created_at"},
+		"classes":           {"id", "name", "created_at"},
+		"users":             {"id", "username", "password_hash", "role", "class_id", "created_at"},
+		"sessions":          {"id", "session_id", "user_id", "created_at", "expires_at"},
+		"materials":         {"id", "class_id", "uploaded_by", "title", "original_filename", "stored_filename", "content_type", "created_at"},
+		"knowledge_entries": {"id", "class_id", "material_id", "body_text", "created_at"},
+		"knowledge_indexes": {
+			"knowledge_entry_id", "class_id", "material_id", "generation", "status", "strategy",
+			"max_chars", "overlap_percent", "separator", "remove_urls_emails", "fold_whitespace",
+			"failure_code", "created_at", "updated_at",
+		},
+		"knowledge_chunks": {
+			"id", "class_id", "material_id", "knowledge_entry_id", "index_generation", "chunk_index",
+			"chunk_text", "start_offset", "end_offset", "offset_basis", "index_status", "created_at",
+		},
 	}
 
 	for table, columns := range required {
@@ -134,11 +143,16 @@ func TestSchemaHasRequiredIndexes(t *testing.T) {
 	env := NewEnv(t)
 
 	required := map[string][]string{
-		"classes":          {"PRIMARY", "uq_classes_name"},
-		"users":            {"PRIMARY", "uq_users_username", "uq_users_id_class", "idx_users_class"},
-		"sessions":         {"PRIMARY", "uq_sessions_session_id", "idx_sessions_user", "idx_sessions_expires"},
-		"materials":        {"PRIMARY", "uq_materials_stored_filename", "uq_materials_id_class", "idx_materials_class"},
-		"knowledge_entries": {"PRIMARY", "uq_knowledge_material", "idx_knowledge_class"},
+		"classes":           {"PRIMARY", "uq_classes_name"},
+		"users":             {"PRIMARY", "uq_users_username", "uq_users_id_class", "idx_users_class"},
+		"sessions":          {"PRIMARY", "uq_sessions_session_id", "idx_sessions_user", "idx_sessions_expires"},
+		"materials":         {"PRIMARY", "uq_materials_stored_filename", "uq_materials_id_class", "idx_materials_class"},
+		"knowledge_entries": {"PRIMARY", "uq_knowledge_material", "idx_knowledge_class", "uq_knowledge_id_class"},
+		"knowledge_indexes": {"PRIMARY", "idx_knowledge_indexes_class", "idx_knowledge_indexes_status"},
+		"knowledge_chunks": {
+			"PRIMARY", "uq_knowledge_chunks_position", "ft_knowledge_chunks_text",
+			"idx_knowledge_chunks_class", "idx_knowledge_chunks_status",
+		},
 	}
 
 	for table, indexes := range required {
@@ -283,13 +297,13 @@ func TestKnowledgeEntriesRequireAClass(t *testing.T) {
 	materialID := insertMaterial(t, env.DB, classID, teacherID, "store-1")
 
 	if _, err := env.DB.Exec(
-		"INSERT INTO knowledge_entries (class_id, material_id, content) VALUES (NULL, ?, 'text')", materialID,
+		"INSERT INTO knowledge_entries (class_id, material_id, body_text) VALUES (NULL, ?, 'text')", materialID,
 	); err == nil {
 		t.Error("knowledge_entries with class_id = NULL was accepted")
 	}
 
 	if _, err := env.DB.Exec(
-		"INSERT INTO knowledge_entries (material_id, content) VALUES (?, 'text')", materialID,
+		"INSERT INTO knowledge_entries (material_id, body_text) VALUES (?, 'text')", materialID,
 	); err == nil {
 		t.Error("knowledge_entries with class_id omitted was accepted")
 	}
@@ -325,7 +339,7 @@ func TestKnowledgeEntryMustMatchItsMaterialClass(t *testing.T) {
 	materialA := insertMaterial(t, env.DB, classA, teacherA, "store-a")
 
 	if _, err := env.DB.Exec(
-		"INSERT INTO knowledge_entries (class_id, material_id, content) VALUES (?, ?, 'text')",
+		"INSERT INTO knowledge_entries (class_id, material_id, body_text) VALUES (?, ?, 'text')",
 		classB, materialA,
 	); err == nil {
 		t.Error("a Class B knowledge entry referenced Class A material, want a foreign-key error")
@@ -341,14 +355,14 @@ func TestKnowledgeEntryIsUniquePerMaterial(t *testing.T) {
 	materialID := insertMaterial(t, env.DB, classID, teacherID, "store-a")
 
 	if _, err := env.DB.Exec(
-		"INSERT INTO knowledge_entries (class_id, material_id, content) VALUES (?, ?, 'first')",
+		"INSERT INTO knowledge_entries (class_id, material_id, body_text) VALUES (?, ?, 'first')",
 		classID, materialID,
 	); err != nil {
 		t.Fatalf("first knowledge entry: %v", err)
 	}
 
 	if _, err := env.DB.Exec(
-		"INSERT INTO knowledge_entries (class_id, material_id, content) VALUES (?, ?, 'second')",
+		"INSERT INTO knowledge_entries (class_id, material_id, body_text) VALUES (?, ?, 'second')",
 		classID, materialID,
 	); err == nil {
 		t.Error("a second knowledge entry for the same material was accepted")
@@ -383,6 +397,19 @@ func TestSessionDigestIsUniqueHex(t *testing.T) {
 		strings.Repeat("a", 65), userID,
 	); err == nil {
 		t.Error("a 65-character session id was accepted, want CHAR(64) to reject it")
+	}
+
+	// DA01: the retired refresh credential has no column to live in.
+	var columns int
+	if err := env.DB.QueryRow(`
+		SELECT COUNT(*)
+		  FROM information_schema.columns
+		 WHERE table_schema = DATABASE() AND table_name = 'sessions' AND column_name = 'refresh_id'`,
+	).Scan(&columns); err != nil {
+		t.Fatalf("inspect sessions columns: %v", err)
+	}
+	if columns != 0 {
+		t.Error("sessions still has a refresh_id column")
 	}
 }
 

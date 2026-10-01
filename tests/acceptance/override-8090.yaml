@@ -1,0 +1,21 @@
+# Compose override for an isolated acceptance stack.
+#
+# The acceptance run wants a clean database, so it uses its own Compose project
+# (`-p campusclaw-zwh-acc`) with its own volumes. That project cannot also own
+# host port 8080, so the web tier is published on 8090 instead:
+#
+#   DEV_PUBLIC_ORIGIN= PUBLIC_ORIGIN=http://localhost:8090 \
+#   docker compose -p campusclaw-zwh-acc -f compose.yaml \
+#     -f tests/acceptance/override-8090.yaml up -d --build
+#
+# PUBLIC_ORIGIN has to match the origin the browser actually uses, and
+# DEV_PUBLIC_ORIGIN is cleared because the API only accepts it together with
+# PUBLIC_ORIGIN=http://localhost:8080.
+#
+# Tear the project down with `docker compose -p campusclaw-zwh-acc down -v`,
+# which removes only this project's own volumes.
+
+services:
+  web:
+    ports: !override
+      - "8090:80"

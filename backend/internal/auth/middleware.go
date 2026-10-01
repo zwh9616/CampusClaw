@@ -9,30 +9,23 @@ import (
 	"campusclaw/internal/httpx"
 )
 
-// Authenticator resolves session cookies and owns the cookie attributes used
-// when a session is handed out or cleared.
+// Authenticator resolves Bearer access tokens against the session store.
 type Authenticator struct {
-	store  *Store
-	secure bool
+	store *Store
 }
 
 // NewAuthenticator builds an authenticator over a session store.
-func NewAuthenticator(store *Store, secure bool) *Authenticator {
-	return &Authenticator{store: store, secure: secure}
-}
-
-// Secure reports whether cookies carry the Secure attribute in this
-// deployment, so handlers set and clear them with matching attributes.
-func (a *Authenticator) Secure() bool {
-	return a.secure
+func NewAuthenticator(store *Store) *Authenticator {
+	return &Authenticator{store: store}
 }
 
 // RequireUser rejects requests without a live session and attaches the
 // resolved identity to the request context for inner handlers.
 func (a *Authenticator) RequireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := CookieToken(r)
+		token, ok := BearerToken(r)
 		if !ok {
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			httpx.WriteError(w, http.StatusUnauthorized, httpx.CodeUnauthorized)
 			return
 		}
@@ -40,11 +33,7 @@ func (a *Authenticator) RequireUser(next http.Handler) http.Handler {
 		user, err := a.store.Resolve(r.Context(), token, time.Now())
 		switch {
 		case errors.Is(err, ErrNoSession):
-			// The cookie cannot authenticate anyone, so expire it. This is
-			// also what makes POST /api/logout answer 401 *and* clear the
-			// cookie for a dead session, while still running before the
-			// same-origin check.
-			ClearSessionCookie(w, a.secure)
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			httpx.WriteError(w, http.StatusUnauthorized, httpx.CodeUnauthorized)
 			return
 		case err != nil:

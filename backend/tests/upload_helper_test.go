@@ -106,7 +106,7 @@ func buildUploadRequest(
 	httpRequest := httptest.NewRequest(http.MethodPost, "/api/materials", &body)
 	httpRequest.Header.Set("Content-Type", writer.FormDataContentType())
 	if cookie != nil {
-		httpRequest.AddCookie(cookie)
+		httpRequest.Header.Set("Authorization", "Bearer "+cookie.Value)
 	}
 	for name, value := range headers {
 		httpRequest.Header[name] = []string{value}

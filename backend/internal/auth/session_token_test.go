@@ -7,9 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
-	"strings"
 	"testing"
-	"time"
 )
 
 var lowercaseHex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -83,116 +81,44 @@ func TestDigestTokenMatchesKnownVector(t *testing.T) {
 	}
 }
 
-func TestSetSessionCookieAttributes(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	SetSessionCookie(recorder, "token-value", false)
-
-	cookie := sessionCookie(t, recorder)
-
-	if cookie.Name != CookieName {
-		t.Errorf("Name = %q, want %q", cookie.Name, CookieName)
+func TestBearerTokenParsing(t *testing.T) {
+	token, err := NewToken()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !cookie.HttpOnly {
-		t.Error("HttpOnly is not set")
-	}
-	if cookie.SameSite != http.SameSiteLaxMode {
-		t.Errorf("SameSite = %v, want Lax", cookie.SameSite)
-	}
-	if cookie.Path != "/" {
-		t.Errorf("Path = %q, want /", cookie.Path)
-	}
-	if cookie.MaxAge != int(SessionLifetime.Seconds()) {
-		t.Errorf("Max-Age = %d, want %d", cookie.MaxAge, int(SessionLifetime.Seconds()))
-	}
-	if cookie.Secure {
-		t.Error("Secure is set for a plain-HTTP deployment")
-	}
-	if cookie.Domain != "" {
-		t.Errorf("Domain = %q, want empty so the cookie stays host-scoped", cookie.Domain)
-	}
-}
-
-func TestSetSessionCookieHonoursSecureFlag(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	SetSessionCookie(recorder, "token-value", true)
-
-	if cookie := sessionCookie(t, recorder); !cookie.Secure {
-		t.Error("Secure is not set for an HTTPS deployment")
-	}
-}
-
-// AU01: the cookie must carry the token and nothing else — no identity claims.
-func TestSessionCookieCarriesNoIdentity(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	SetSessionCookie(recorder, "token-value", true)
-
-	cookie := sessionCookie(t, recorder)
-
-	if cookie.Value != "token-value" {
-		t.Errorf("Value = %q, want the raw token", cookie.Value)
-	}
-
-	for _, claim := range []string{"role", "class_id", "user_id", "teacher", "student"} {
-		if strings.Contains(strings.ToLower(cookie.String()), claim) {
-			t.Errorf("cookie contains identity claim %q: %s", claim, cookie.String())
+	for _, header := range []string{"", "Basic " + token.Value, "Bearer bad", "Bearer " + token.Value + " trailing", "Bearer  " + token.Value} {
+		request := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+		if header != "" {
+			request.Header.Set("Authorization", header)
+		}
+		if _, ok := BearerToken(request); ok {
+			t.Errorf("accepted %q", header)
 		}
 	}
-}
-
-func TestClearSessionCookieExpiresWithMatchingAttributes(t *testing.T) {
-	set := httptest.NewRecorder()
-	SetSessionCookie(set, "token-value", true)
-	original := sessionCookie(t, set)
-
-	clearedRecorder := httptest.NewRecorder()
-	ClearSessionCookie(clearedRecorder, true)
-	cleared := sessionCookie(t, clearedRecorder)
-
-	if cleared.MaxAge != -1 {
-		t.Errorf("Max-Age = %d, want -1", cleared.MaxAge)
+	request := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	request.Header.Set("Authorization", "Bearer "+token.Value)
+	if got, ok := BearerToken(request); !ok || got != token.Value {
+		t.Errorf("BearerToken = %q, %t", got, ok)
 	}
-
-	if !cleared.Expires.Before(time.Now()) {
-		t.Errorf("Expires = %v, want a past time", cleared.Expires)
-	}
-
-	if cleared.Value != "" {
-		t.Errorf("Value = %q, want empty", cleared.Value)
-	}
-
-	// Attributes must match the original or the browser keeps the old cookie.
-	if cleared.Path != original.Path || cleared.HttpOnly != original.HttpOnly ||
-		cleared.SameSite != original.SameSite || cleared.Secure != original.Secure {
-		t.Errorf("cleared cookie attributes differ from the set cookie:\nset:     %s\ncleared: %s",
-			original.String(), cleared.String())
+	request.Header.Add("Authorization", "Bearer "+token.Value)
+	if _, ok := BearerToken(request); ok {
+		t.Error("accepted duplicate Authorization headers")
 	}
 }
 
-func TestCookieTokenRejectsAbsentAndEmpty(t *testing.T) {
-	absent := httptest.NewRequest(http.MethodGet, "/api/me", nil)
-	if _, ok := CookieToken(absent); ok {
-		t.Error("CookieToken reported a token for a request with no cookie")
+// AU07: a cookie never stands in for the Authorization header, whatever its
+// name, so a browser still carrying an old session cookie cannot authenticate.
+func TestBearerTokenIgnoresCookies(t *testing.T) {
+	token, err := NewToken()
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	empty := httptest.NewRequest(http.MethodGet, "/api/me", nil)
-	empty.AddCookie(&http.Cookie{Name: CookieName, Value: ""})
-	if _, ok := CookieToken(empty); ok {
-		t.Error("CookieToken reported a token for an empty cookie")
+	for _, name := range []string{"campusclaw_session", "campusclaw_refresh", "access_token"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+		request.AddCookie(&http.Cookie{Name: name, Value: token.Value})
+		if got, ok := BearerToken(request); ok {
+			t.Errorf("BearerToken accepted cookie %q as %q", name, got)
+		}
 	}
-
-	present := httptest.NewRequest(http.MethodGet, "/api/me", nil)
-	present.AddCookie(&http.Cookie{Name: CookieName, Value: "abc"})
-	if got, ok := CookieToken(present); !ok || got != "abc" {
-		t.Errorf("CookieToken() = %q, %v; want abc, true", got, ok)
-	}
-}
-
-func sessionCookie(t *testing.T, recorder *httptest.ResponseRecorder) *http.Cookie {
-	t.Helper()
-
-	cookies := recorder.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("got %d cookies, want exactly 1", len(cookies))
-	}
-	return cookies[0]
 }

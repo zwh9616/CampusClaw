@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"campusclaw/internal/chunking"
 	"campusclaw/internal/httpx"
 )
 
@@ -34,6 +35,10 @@ func StatusForUpload(err error) (int, string) {
 	case errors.Is(err, ErrUnsupportedType):
 		return http.StatusUnsupportedMediaType, httpx.CodeUnsupportedMediaType
 	case errors.Is(err, ErrInvalidFile), errors.Is(err, ErrUnsafeFilename):
+		return http.StatusBadRequest, httpx.CodeBadRequest
+	case errors.Is(err, chunking.ErrInvalidOptions):
+		// An unusable split strategy is a bad request like any other bad form
+		// field, and it is decided before anything is stored.
 		return http.StatusBadRequest, httpx.CodeBadRequest
 	case errors.Is(err, ErrTooLarge):
 		return http.StatusRequestEntityTooLarge, httpx.CodePayloadTooLarge

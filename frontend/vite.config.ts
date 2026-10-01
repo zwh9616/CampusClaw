@@ -8,8 +8,9 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
+      // Vite preserves the Authorization header through the same-origin proxy.
       '/api/': {
-        target: 'http://localhost:8080',
+        target: process.env.API_PROXY_TARGET ?? 'http://localhost:8080',
         changeOrigin: true,
       },
     },

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -31,6 +32,8 @@ const testDatabaseSuffix = "_test"
 
 // businessTables are dropped between tests, in foreign-key-safe order.
 var businessTables = []string{
+	"knowledge_chunks",
+	"knowledge_indexes",
 	"knowledge_entries",
 	"materials",
 	"sessions",
@@ -141,7 +144,7 @@ func (e *Env) LoginWith(t *testing.T, username, password string, existing *http.
 	request := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	if existing != nil {
-		request.AddCookie(existing)
+		request.Header.Set("Authorization", "Bearer "+existing.Value)
 	}
 
 	recorder := e.Do(t, request)
@@ -149,12 +152,13 @@ func (e *Env) LoginWith(t *testing.T, username, password string, existing *http.
 		t.Fatalf("login %s: status = %d, body = %s", username, recorder.Code, recorder.Body.String())
 	}
 
-	cookies := recorder.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatalf("login %s: no session cookie returned", username)
+	var response struct {
+		Token string `json:"token"`
 	}
-
-	return cookies[0]
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.Token == "" {
+		t.Fatalf("login %s: missing access token: %v", username, err)
+	}
+	return &http.Cookie{Name: "access_token", Value: response.Token}
 }
 
 // Password returns the generated seed password for an account.
@@ -261,8 +265,23 @@ func fillMissingSecrets(t *testing.T) {
 		t.Setenv("PUBLIC_ORIGIN", "http://localhost:8080")
 	}
 
-	if os.Getenv("SESSION_COOKIE_SECURE") == "" {
-		t.Setenv("SESSION_COOKIE_SECURE", "false")
+	// The vector store and the two model gateways are server-side dependencies.
+	// A test that needs a reachable one substitutes it through server options;
+	// these defaults only satisfy configuration loading.
+	defaults := map[string]string{
+		"QDRANT_URL":           "http://127.0.0.1:6333",
+		"EMBEDDING_BASE_URL":   "http://127.0.0.1:1/v1",
+		"EMBEDDING_MODEL":      "test-embedding",
+		"EMBEDDING_DIMENSIONS": "8",
+		"EMBEDDING_API_KEY":    randomSecret(t),
+		"CHAT_BASE_URL":        "http://127.0.0.1:1/v1",
+		"CHAT_MODEL":           "test-chat",
+		"CHAT_API_KEY":         randomSecret(t),
+	}
+	for name, value := range defaults {
+		if os.Getenv(name) == "" {
+			t.Setenv(name, value)
+		}
 	}
 
 	// Each test gets its own upload root, so stored originals from one test

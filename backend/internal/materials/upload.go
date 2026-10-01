@@ -11,10 +11,15 @@ import (
 	"net/textproto"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"campusclaw/internal/auth"
+	"campusclaw/internal/chunking"
 	"campusclaw/internal/httpx"
 )
+
+// indexTimeout bounds one material's background index task.
+const indexTimeout = 5 * time.Minute
 
 type createdResponse struct {
 	Material Material `json:"material"`
@@ -44,6 +49,16 @@ func (h *Handlers) Upload(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = r.MultipartForm.RemoveAll() }()
 
 	title, err := readTitle(r)
+	if err != nil {
+		writeUploadFailure(w, err)
+		return
+	}
+
+	// The split strategy is validated before anything is stored, so an
+	// unusable strategy cannot leave a material, a knowledge row or a file
+	// behind. A strategy that is not custom ignores the parameters it does not
+	// take rather than rejecting them.
+	chunkOptions, err := chunking.ParseRequest(chunkRequest(r))
 	if err != nil {
 		writeUploadFailure(w, err)
 		return
@@ -128,8 +143,62 @@ func (h *Handlers) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Everything above this line has committed. Indexing starts now, on a
+	// context that outlives the request, so neither a gateway outage nor a slow
+	// embed can undo or delay a successful upload.
+	h.startIndexing(r.Context(), user.ClassID, material.ID, chunkOptions)
+
 	w.Header().Set("Location", "/api/materials/"+material.ID.String())
 	httpx.WriteJSON(w, http.StatusCreated, createdResponse{Material: material})
+}
+
+// startIndexing runs the persistent index task for a freshly committed
+// material.
+//
+// The work is done in the background because it calls two external services for
+// every batch of chunks; the material's row already records that an index is
+// pending, so a crash here is recovered by the startup backfill rather than
+// lost.
+func (h *Handlers) startIndexing(
+	ctx context.Context,
+	classID, materialID httpx.ID,
+	options chunking.Options,
+) {
+	if h.indexer == nil {
+		return
+	}
+
+	base := context.WithoutCancel(ctx)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(base, indexTimeout)
+		defer cancel()
+
+		if err := h.indexer.IndexMaterial(ctx, uint64(classID), uint64(materialID), options); err != nil {
+			log.Printf("materials: indexing material %d failed: %v", uint64(materialID), err)
+		}
+	}()
+}
+
+// chunkRequest reads the optional split fields from the upload form. An absent
+// field is the empty string, which the chunker reads as "not supplied".
+func chunkRequest(r *http.Request) chunking.Request {
+	value := func(name string) string {
+		values := r.MultipartForm.Value[name]
+		if len(values) == 0 {
+			return ""
+		}
+		return values[0]
+	}
+
+	return chunking.Request{
+		Strategy:         value("chunk_strategy"),
+		MaxChars:         value("chunk_max_chars"),
+		OverlapPercent:   value("chunk_overlap_percent"),
+		Separator:        value("chunk_separator"),
+		RemoveURLsEmails: value("remove_urls_emails"),
+		FoldWhitespace:   value("fold_whitespace"),
+	}
 }
 
 // extract reads the stored original through the extractor for its extension.

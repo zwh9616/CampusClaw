@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import * as api from '../api'
-import type { Material, MaterialDetail, User } from '../api'
+import type { ChunkStrategy, Material, MaterialDetail, User } from '../api'
 import Brand from '../components/Brand'
+import ChunkStrategyFields from '../components/ChunkStrategyFields'
+import IndexPanel from '../components/IndexPanel'
+import RetrievalPanel from '../components/RetrievalPanel'
 
 interface Props {
   user: User
@@ -21,8 +24,8 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
   const [detail, setDetail] = useState<MaterialDetail | null>(null)
 
   /**
-   * run funnels every server call through one place, so a 401 always drops the
-   * in-memory identity and a transport failure is never mistaken for one.
+   * run funnels every server call through one place, so a 401 always returns to
+   * the login page and a transport failure is never mistaken for one.
    */
   const run = useCallback(
     async <T,>(operation: () => Promise<T>): Promise<T | undefined> => {
@@ -59,20 +62,37 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
   }, [refresh])
 
   async function handleSignOut() {
-    // A 204 and an already-dead session both end with the user logged out.
-    await run(() => api.logout().catch(() => undefined))
-    onSignOut()
-  }
-
-  async function handleOpen(material: Material) {
-    setDetail(null)
-    setNotice(null)
-
-    const loaded = await run(() => api.getMaterial(material.id))
-    if (loaded !== undefined) {
-      setDetail(loaded)
+    try {
+      await api.logout()
+      onSignOut()
+    } catch (failure) {
+      if (failure instanceof api.ApiError && failure.status === 401) {
+        onSignOut()
+      } else {
+        setError(failure instanceof api.ApiError ? failure.message : '网络错误，请重试。')
+      }
     }
   }
+
+  /**
+   * openMaterial loads one material's detail.
+   *
+   * A search hit names its material by id rather than by row, so the list and
+   * the retrieval panel reach the detail the same way; the class check stays on
+   * the server in both cases.
+   */
+  const openMaterial = useCallback(
+    async (materialId: string) => {
+      setDetail(null)
+      setNotice(null)
+
+      const loaded = await run(() => api.getMaterial(materialId))
+      if (loaded !== undefined) {
+        setDetail(loaded)
+      }
+    },
+    [run],
+  )
 
   return (
     <main className="app materials-page">
@@ -97,11 +117,17 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
       </div>
 
       {error !== null && (
-        <p className="error" role="alert">
-          {error}
-        </p>
+        <div>
+          <p className="error" role="alert">{error}</p>
+          <button type="button" className="secondary" onClick={() => void refresh()}>重试</button>
+        </div>
       )}
       {notice !== null && <p className="notice" role="status">{notice}</p>}
+
+      <RetrievalPanel
+        onUnauthorized={onUnauthorized}
+        onOpenMaterial={(materialId) => void openMaterial(materialId)}
+      />
 
       <div className="dashboard-grid">
         {user.role === 'teacher' && (
@@ -135,12 +161,17 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
                     </span>
                   </div>
                   <div className="material-actions">
-                    <button type="button" className="secondary" onClick={() => void handleOpen(material)}>
+                    <button type="button" className="secondary" onClick={() => void openMaterial(material.id)}>
                       查看
                     </button>
-                    <a className="button secondary" href={api.downloadPath(material.id)}>
+                    <button type="button" className="secondary" onClick={() => void run(() => api.downloadMaterial(material.id, material.original_filename))}>
                       下载
-                    </a>
+                    </button>
+                    {/* Index controls are a convenience for the teacher; the
+                        server refuses a student's rebuild on its own. */}
+                    {user.role === 'teacher' && (
+                      <IndexPanel material={material} onUnauthorized={onUnauthorized} />
+                    )}
                   </div>
                 </li>
               ))}
@@ -169,6 +200,7 @@ interface UploadPanelProps {
 function UploadPanel({ onUploaded, onUnauthorized }: UploadPanelProps) {
   const [title, setTitle] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [strategy, setStrategy] = useState<ChunkStrategy>(api.DEFAULT_CHUNK_STRATEGY)
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
 
@@ -184,7 +216,7 @@ function UploadPanel({ onUploaded, onUnauthorized }: UploadPanelProps) {
     setProblem(null)
 
     try {
-      await api.uploadMaterial(title, file)
+      await api.uploadMaterial(title, file, strategy)
       setTitle('')
       setFile(null)
       await onUploaded(title)
@@ -232,6 +264,8 @@ function UploadPanel({ onUploaded, onUnauthorized }: UploadPanelProps) {
           required
         />
 
+        <ChunkStrategyFields value={strategy} onChange={setStrategy} idPrefix="upload" />
+
         {problem !== null && (
           <p className="error" role="alert">
             {problem}
@@ -255,7 +289,7 @@ function describeUploadFailure(failure: api.ApiError): string {
     case 422:
       return '无法从该文档提取文本：可能是加密文件、扫描件或没有可提取的正文。'
     case 400:
-      return '文件内容或文件名不合法，上传已取消。'
+      return '文件内容、文件名或切分参数不合法，上传已取消。'
     case 403:
       return '当前账号没有上传权限。'
     case 503:

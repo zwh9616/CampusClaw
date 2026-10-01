@@ -114,7 +114,7 @@ func (r *Repo) Create(ctx context.Context, input NewMaterial) (Material, error) 
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO knowledge_entries (class_id, material_id, content) VALUES (?, ?, ?)`,
+		INSERT INTO knowledge_entries (class_id, material_id, body_text) VALUES (?, ?, ?)`,
 		uint64(input.ClassID), uint64(materialID), input.Content,
 	); err != nil {
 		return Material{}, fmt.Errorf("insert knowledge entry: %w", err)
@@ -142,7 +142,7 @@ func (r *Repo) Detail(ctx context.Context, id, classID httpx.ID) (Material, stri
 	var content string
 	err = r.db.QueryRowContext(
 		ctx,
-		`SELECT content FROM knowledge_entries WHERE material_id = ? AND class_id = ?`,
+		`SELECT body_text FROM knowledge_entries WHERE material_id = ? AND class_id = ?`,
 		uint64(id), uint64(classID),
 	).Scan(&content)
 

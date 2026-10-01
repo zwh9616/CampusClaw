@@ -332,7 +332,7 @@ func TestTeacherBUploadsOnlyForClassB(t *testing.T) {
 	}
 	var knowledgeClass uint64
 	var knowledgeText string
-	if err := env.DB.QueryRow("SELECT class_id, content FROM knowledge_entries WHERE material_id = ?", materialID).
+	if err := env.DB.QueryRow("SELECT class_id, body_text FROM knowledge_entries WHERE material_id = ?", materialID).
 		Scan(&knowledgeClass, &knowledgeText); err != nil {
 		t.Fatalf("read Class B knowledge: %v", err)
 	}

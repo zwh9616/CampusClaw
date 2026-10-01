@@ -5,11 +5,10 @@ import LoginPage from './pages/LoginPage'
 import MaterialsPage from './pages/MaterialsPage'
 
 /**
- * Session is the whole client-side identity.
+ * The current identity lives in component state for this page only.
  *
- * It lives in memory only. There is no token, role or class kept in
- * localStorage, and the server re-resolves identity from the session cookie on
- * every request, so nothing here can be edited into a privilege.
+ * The access token itself is kept in localStorage by ./api, so a reload
+ * restores the session by re-resolving that token against the session database.
  */
 type Session =
   | { status: 'loading' }
@@ -24,7 +23,7 @@ export default function App() {
     setSession({ status: 'loading' })
 
     try {
-      const user = await api.getCurrentUser()
+      const user = await api.restoreSession()
       setSession(user === null ? { status: 'anonymous' } : { status: 'authenticated', user })
     } catch {
       // A network or 5xx failure is shown as such and is retryable. Treating it

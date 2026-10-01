@@ -3,8 +3,9 @@
 // acceptance criterion.
 //
 // It never talks to the API container or the database directly: everything goes
-// through the same origin a browser uses, with real cookies, so the run covers
-// authentication, tenancy, parsing and the gateway together.
+// through the same origin a browser uses, with Bearer access tokens and no
+// cookies at all, so the run covers authentication, tenancy, parsing and the
+// gateway together.
 //
 // Raw database row counts are asserted by the Go integration suite in
 // backend/tests, which runs against the same database from inside the network.
@@ -26,7 +27,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/http/cookiejar"
 	"net/textproto"
 	"os"
 	"sort"
@@ -76,27 +76,27 @@ func valueOr(value, fallback string) string {
 
 // ---------------------------------------------------------------- harness ---
 
-// browser is one independent cookie jar, standing in for one browser profile.
+// browser holds one access token and no cookie jar: the token in the
+// Authorization header is the only credential the stack accepts.
 type browser struct {
-	name   string
-	client *http.Client
-	base   string
+	name        string
+	client      *http.Client
+	base        string
+	accessToken string
 }
 
 func newBrowser(name, base string) (*browser, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
-
 	return &browser{
 		name:   name,
-		client: &http.Client{Jar: jar, Timeout: requestTimeout},
+		client: &http.Client{Timeout: requestTimeout},
 		base:   strings.TrimSuffix(base, "/"),
 	}, nil
 }
 
 func (b *browser) do(request *http.Request) (*http.Response, []byte, error) {
+	if b.accessToken != "" && request.URL.Path != "/api/login" {
+		request.Header.Set("Authorization", "Bearer "+b.accessToken)
+	}
 	response, err := b.client.Do(request)
 	if err != nil {
 		return nil, nil, err
@@ -284,6 +284,12 @@ func (r *runner) login(username string) (*browser, bool) {
 		r.fail("login as %s: status %d (%s)", username, response.StatusCode, trim(payload))
 		return nil, false
 	}
+	var login struct{ Token string }
+	if err := json.Unmarshal(payload, &login); err != nil || login.Token == "" {
+		r.fail("login as %s did not return an access token: %v", username, err)
+		return nil, false
+	}
+	session.accessToken = login.Token
 
 	return session, true
 }

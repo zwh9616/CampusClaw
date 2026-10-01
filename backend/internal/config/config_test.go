@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,15 @@ var envVars = []string{
 	"SEED_STUDENT_B1_PASSWORD",
 	"PUBLIC_ORIGIN",
 	"DEV_PUBLIC_ORIGIN",
-	"SESSION_COOKIE_SECURE",
+	"QDRANT_URL",
+	"QDRANT_COLLECTION",
+	"EMBEDDING_BASE_URL",
+	"EMBEDDING_MODEL",
+	"EMBEDDING_DIMENSIONS",
+	"EMBEDDING_API_KEY",
+	"CHAT_BASE_URL",
+	"CHAT_MODEL",
+	"CHAT_API_KEY",
 }
 
 func setEnv(t *testing.T, overrides map[string]string) {
@@ -48,7 +57,13 @@ func validEnv(overrides map[string]string) map[string]string {
 		"SEED_TEACHER_B_PASSWORD":  "teacher-b-password",
 		"SEED_STUDENT_B1_PASSWORD": "student-b1-password",
 		"PUBLIC_ORIGIN":            "http://localhost:8080",
-		"SESSION_COOKIE_SECURE":    "false",
+		"EMBEDDING_BASE_URL":       "http://embedding.internal/v1",
+		"EMBEDDING_MODEL":          "text-embedding-3-small",
+		"EMBEDDING_DIMENSIONS":     "1536",
+		"EMBEDDING_API_KEY":        "embedding-key",
+		"CHAT_BASE_URL":            "http://chat.internal/v1",
+		"CHAT_MODEL":               "gpt-4o-mini",
+		"CHAT_API_KEY":             "chat-key",
 	}
 	for name, value := range overrides {
 		env[name] = value
@@ -70,11 +85,27 @@ func TestLoadSucceedsWithCompleteEnvironment(t *testing.T) {
 	if cfg.UploadDir != defaultUploadDir {
 		t.Errorf("UploadDir = %q, want default %q", cfg.UploadDir, defaultUploadDir)
 	}
+	if cfg.Qdrant.Collection != defaultQdrantCollection {
+		t.Errorf("Qdrant.Collection = %q", cfg.Qdrant.Collection)
+	}
 	if cfg.PublicOrigin.String() != "http://localhost:8080" {
 		t.Errorf("PublicOrigin = %q", cfg.PublicOrigin.String())
 	}
-	if cfg.SessionCookieSecure {
-		t.Error("SessionCookieSecure = true, want false")
+}
+
+func TestQdrantCollectionCanBeChangedSafely(t *testing.T) {
+	setEnv(t, validEnv(map[string]string{"QDRANT_COLLECTION": "campusclaw_chunks_course_2048"}))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Qdrant.Collection != "campusclaw_chunks_course_2048" {
+		t.Errorf("Qdrant.Collection = %q", cfg.Qdrant.Collection)
+	}
+
+	setEnv(t, validEnv(map[string]string{"QDRANT_COLLECTION": "../other"}))
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "QDRANT_COLLECTION") {
+		t.Errorf("invalid collection error = %v", err)
 	}
 }
 
@@ -190,7 +221,6 @@ func TestLoadAllowsOnlyExplicitLocalViteOrigin(t *testing.T) {
 	for name, overrides := range map[string]map[string]string{
 		"other dev port":         {"DEV_PUBLIC_ORIGIN": "http://localhost:5174"},
 		"external dev host":      {"DEV_PUBLIC_ORIGIN": "http://evil.example"},
-		"secure cookie":          {"DEV_PUBLIC_ORIGIN": "http://localhost:5173", "SESSION_COOKIE_SECURE": "true"},
 		"nonlocal public origin": {"DEV_PUBLIC_ORIGIN": "http://localhost:5173", "PUBLIC_ORIGIN": "https://school.example"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -203,22 +233,143 @@ func TestLoadAllowsOnlyExplicitLocalViteOrigin(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresExplicitCookieSecureFlag(t *testing.T) {
-	for _, value := range []string{"", "yes", "1", "TRUE!"} {
-		setEnv(t, validEnv(map[string]string{"SESSION_COOKIE_SECURE": value}))
+func TestLoadReadsVectorAndGatewayConfiguration(t *testing.T) {
+	setEnv(t, validEnv(nil))
 
-		if _, err := Load(); err == nil {
-			t.Errorf("SESSION_COOKIE_SECURE=%q: Load() succeeded, want error", value)
-		}
-	}
-
-	setEnv(t, validEnv(map[string]string{"SESSION_COOKIE_SECURE": "true"}))
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if !cfg.SessionCookieSecure {
-		t.Error("SessionCookieSecure = false, want true")
+
+	if got := cfg.Qdrant.URL.String(); got != defaultQdrantURL {
+		t.Errorf("Qdrant.URL = %q, want the internal default %q", got, defaultQdrantURL)
+	}
+
+	// A gateway is commonly mounted under a path, so the path must survive.
+	if got := cfg.Embedding.BaseURL.String(); got != "http://embedding.internal/v1" {
+		t.Errorf("Embedding.BaseURL = %q, want the configured gateway", got)
+	}
+	if cfg.Embedding.Model != "text-embedding-3-small" {
+		t.Errorf("Embedding.Model = %q", cfg.Embedding.Model)
+	}
+	if cfg.Embedding.Dimensions != 1536 {
+		t.Errorf("Embedding.Dimensions = %d, want 1536", cfg.Embedding.Dimensions)
+	}
+
+	if got := cfg.Chat.BaseURL.String(); got != "http://chat.internal/v1" {
+		t.Errorf("Chat.BaseURL = %q", got)
+	}
+	if cfg.Chat.Model != "gpt-4o-mini" {
+		t.Errorf("Chat.Model = %q", cfg.Chat.Model)
+	}
+}
+
+func TestLoadNormalisesTrailingSlashOnAGatewayBaseURL(t *testing.T) {
+	setEnv(t, validEnv(map[string]string{"CHAT_BASE_URL": "https://chat.example.edu/v1/"}))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if got := cfg.Chat.BaseURL.String(); got != "https://chat.example.edu/v1" {
+		t.Errorf("Chat.BaseURL = %q, want no trailing slash", got)
+	}
+}
+
+// A width the collection cannot be created with must fail at startup, and the
+// message must name the variable without echoing what was supplied.
+func TestLoadRejectsInvalidEmbeddingDimensions(t *testing.T) {
+	cases := map[string]string{
+		"empty":        "",
+		"not a number": "many",
+		"zero":         "0",
+		"negative":     "-1",
+		"fraction":     "1536.5",
+		"too large":    strconv.Itoa(maxEmbeddingDimensions + 1),
+	}
+
+	for name, dimensions := range cases {
+		t.Run(name, func(t *testing.T) {
+			setEnv(t, validEnv(map[string]string{"EMBEDDING_DIMENSIONS": dimensions}))
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() succeeded with EMBEDDING_DIMENSIONS=%q", dimensions)
+			}
+			if !strings.Contains(err.Error(), "EMBEDDING_DIMENSIONS") {
+				t.Errorf("error %q does not name EMBEDDING_DIMENSIONS", err)
+			}
+			if dimensions != "" && strings.Contains(err.Error(), dimensions) {
+				t.Errorf("error %q echoed the supplied dimension", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsTheDimensionBounds(t *testing.T) {
+	for _, dimensions := range []int{1, maxEmbeddingDimensions} {
+		setEnv(t, validEnv(map[string]string{"EMBEDDING_DIMENSIONS": strconv.Itoa(dimensions)}))
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want %d to be accepted", err, dimensions)
+		}
+		if cfg.Embedding.Dimensions != dimensions {
+			t.Errorf("Embedding.Dimensions = %d, want %d", cfg.Embedding.Dimensions, dimensions)
+		}
+	}
+}
+
+func TestLoadRejectsMalformedServiceURLs(t *testing.T) {
+	cases := []struct {
+		name     string
+		variable string
+		value    string
+	}{
+		{"embedding without scheme", "EMBEDDING_BASE_URL", "embedding.internal/v1"},
+		{"embedding unsupported scheme", "EMBEDDING_BASE_URL", "ftp://embedding.internal"},
+		{"embedding without host", "EMBEDDING_BASE_URL", "http://"},
+		{"embedding with credentials", "EMBEDDING_BASE_URL", "http://user:pass@embedding.internal"},
+		{"chat without scheme", "CHAT_BASE_URL", "chat.internal"},
+		{"qdrant without host", "QDRANT_URL", "http://"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			setEnv(t, validEnv(map[string]string{testCase.variable: testCase.value}))
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), testCase.variable) {
+				t.Fatalf("Load() error = %v, want a %s rejection", err, testCase.variable)
+			}
+		})
+	}
+}
+
+// The gateway keys are server-side secrets: a failed start names the missing
+// variable but must never print a key that was supplied.
+func TestLoadNeverEchoesGatewayKeys(t *testing.T) {
+	env := validEnv(nil)
+	delete(env, "EMBEDDING_BASE_URL")
+	delete(env, "CHAT_MODEL")
+	setEnv(t, env)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() succeeded with an incomplete environment")
+	}
+
+	for _, secret := range []string{"embedding-key", "chat-key"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error %q leaked a gateway key", err)
+		}
+	}
+
+	for _, name := range []string{"EMBEDDING_BASE_URL", "CHAT_MODEL"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not name %s", err, name)
+		}
 	}
 }
 

@@ -20,3 +20,7 @@ data/
 Thumbs.db
 .idea/
 .vscode/
+
+# 本地浏览器验收截图与 Playwright 临时快照
+.playwright-cli/
+output/playwright/

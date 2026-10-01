@@ -1,8 +1,9 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import * as api from '../api'
 import type { AnswerResult, SearchHit, SearchMode, SearchResult } from '../api'
 
 interface Props {
+  activeWorkspace: 'materials' | 'ask' | 'search'
   /** Called when the server reports the session is gone. */
   onUnauthorized: () => void
   /** Opens one of the class's materials, still subject to the server's class check. */
@@ -42,7 +43,7 @@ function describe(failure: unknown): string {
  * class material, and the only difference between them is the teacher-only
  * controls rendered elsewhere.
  */
-export default function RetrievalPanel({ onUnauthorized, onOpenMaterial }: Props) {
+export default function RetrievalPanel({ activeWorkspace, onUnauthorized, onOpenMaterial }: Props) {
   const [mode, setMode] = useState<SearchMode>('hybrid')
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<SearchResult | null>(null)
@@ -54,6 +55,8 @@ export default function RetrievalPanel({ onUnauthorized, onOpenMaterial }: Props
   const [asking, setAsking] = useState(false)
   const [askProblem, setAskProblem] = useState<string | null>(null)
   const [activeCitation, setActiveCitation] = useState<number | null>(null)
+  const [searchVersion, setSearchVersion] = useState(0)
+  const [answerVersion, setAnswerVersion] = useState(0)
 
   async function handleSearch(event: FormEvent) {
     event.preventDefault()
@@ -69,6 +72,7 @@ export default function RetrievalPanel({ onUnauthorized, onOpenMaterial }: Props
 
     try {
       setResult(await api.search(query, mode))
+      setSearchVersion((version) => version + 1)
     } catch (failure) {
       if (failure instanceof api.ApiError && failure.status === 401) {
         onUnauthorized()
@@ -96,6 +100,7 @@ export default function RetrievalPanel({ onUnauthorized, onOpenMaterial }: Props
 
     try {
       setAnswer(await api.ask(question))
+      setAnswerVersion((version) => version + 1)
     } catch (failure) {
       if (failure instanceof api.ApiError && failure.status === 401) {
         onUnauthorized()
@@ -109,8 +114,8 @@ export default function RetrievalPanel({ onUnauthorized, onOpenMaterial }: Props
   }
 
   return (
-    <div className="retrieval-area">
-      <section className="card retrieval-card">
+    <div className="retrieval-area" hidden={activeWorkspace === 'materials'}>
+      <section id="workspace-panel-search" role="tabpanel" aria-labelledby="workspace-tab-search" hidden={activeWorkspace !== 'search'} className="card retrieval-card">
         <h2>检索本班材料</h2>
         <p className="muted">
           在已保存的材料正文中查找相关段落，并给出可以打开核对的出处。
@@ -153,6 +158,7 @@ export default function RetrievalPanel({ onUnauthorized, onOpenMaterial }: Props
 
         {result !== null && (
           <SearchResults
+            key={searchVersion}
             result={result}
             onOpenMaterial={onOpenMaterial}
           />
@@ -160,7 +166,7 @@ export default function RetrievalPanel({ onUnauthorized, onOpenMaterial }: Props
 
       </section>
 
-      <section className="card ask-card">
+      <section id="workspace-panel-ask" role="tabpanel" aria-labelledby="workspace-tab-ask" hidden={activeWorkspace !== 'ask'} className="card ask-card">
         <h2>简短问答</h2>
         <p className="muted">
           只有本班材料中有依据时才会回答；回答中的编号与下方出处一一对应。
@@ -188,6 +194,7 @@ export default function RetrievalPanel({ onUnauthorized, onOpenMaterial }: Props
 
         {answer !== null && (
           <Answer
+            key={answerVersion}
             answer={answer}
             active={activeCitation}
             onSelect={setActiveCitation}
@@ -228,7 +235,7 @@ function SearchResults({ result, onOpenMaterial }: {
           </div>
 
           {/* Plain text: material content is untrusted and is never markup. */}
-          <p className="excerpt">{hit.excerpt}</p>
+          <Excerpt text={hit.excerpt} />
 
           <HitDiagnostics hit={hit} />
 
@@ -244,6 +251,24 @@ function SearchResults({ result, onOpenMaterial }: {
         </li>
       ))}
     </ol>
+  )
+}
+
+function Excerpt({ text, revealToken = 0 }: { text: string; revealToken?: number }) {
+  const [expanded, setExpanded] = useState(false)
+  useEffect(() => { if (revealToken > 0) setExpanded(true) }, [revealToken])
+  const chars = Array.from(text)
+  const long = chars.length > 180
+  const shown = long && !expanded ? chars.slice(0, 180).join('') + '…' : text
+  return (
+    <div className="excerpt-block">
+      <p className="excerpt">{shown}</p>
+      {long && (
+        <button type="button" className="excerpt-toggle" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+          {expanded ? '收起原文' : '展开原文'}
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -278,10 +303,21 @@ function Answer({ answer, active, onSelect, onOpenMaterial }: {
   onOpenMaterial: (materialId: string) => void
 }) {
   const citations = answer.citations ?? []
+  const [selectionToken, setSelectionToken] = useState(0)
+  function selectCitation(position: number) {
+    onSelect(position)
+    setSelectionToken((token) => token + 1)
+  }
+  useEffect(() => {
+    if (active === null) return
+    const target = document.getElementById('citation-' + (active + 1))
+    target?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+    target?.focus({ preventScroll: true })
+  }, [active, selectionToken])
 
   return (
     <div className="answer-block">
-      <AnswerText text={answer.answer} citations={citations} onSelect={onSelect} />
+      <AnswerText text={answer.answer} citations={citations} onSelect={selectCitation} />
 
       {citations.length === 0 ? (
         <p className="muted">本题没有可引用的本班材料。</p>
@@ -291,6 +327,7 @@ function Answer({ answer, active, onSelect, onOpenMaterial }: {
             <li
               key={citation.chunk_id}
               id={`citation-${position + 1}`}
+              tabIndex={-1}
               className={active === position ? 'citation citation-active' : 'citation'}
             >
               <div className="hit-head">
@@ -299,7 +336,7 @@ function Answer({ answer, active, onSelect, onOpenMaterial }: {
                   切片 {citation.chunk_index + 1} · 字符 {citation.start_offset}–{citation.end_offset}
                 </span>
               </div>
-              <p className="excerpt">{citation.excerpt}</p>
+              <Excerpt text={citation.excerpt} revealToken={active === position ? selectionToken : 0} />
               <div className="hit-actions">
                 <button
                   type="button"

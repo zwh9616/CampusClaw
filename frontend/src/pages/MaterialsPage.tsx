@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import * as api from '../api'
 import type { ChunkStrategy, Material, MaterialDetail, User } from '../api'
 import Brand from '../components/Brand'
@@ -9,11 +9,16 @@ import RetrievalPanel from '../components/RetrievalPanel'
 interface Props {
   user: User
   onSignOut: () => void
-  /** Called when the server reports the session is gone. */
   onUnauthorized: () => void
 }
 
-/** ACCEPT is the file picker hint; the server enforces the same list. */
+type Workspace = 'materials' | 'ask' | 'search'
+type ContextPanel = { kind: 'reader'; id: string } | { kind: 'index'; material: Material }
+const WORKSPACES: { id: Workspace; label: string; description: string }[] = [
+  { id: 'materials', label: '材料', description: '查看、下载与管理本班资料' },
+  { id: 'ask', label: '问答', description: '根据材料回答问题并核对出处' },
+  { id: 'search', label: '检索', description: '定位材料中的相关段落' },
+]
 const ACCEPT = api.SUPPORTED_EXTENSIONS.join(',')
 
 export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props) {
@@ -21,12 +26,18 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [workspace, setWorkspace] = useState<Workspace>('materials')
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [panel, setPanel] = useState<ContextPanel | null>(null)
   const [detail, setDetail] = useState<MaterialDetail | null>(null)
+  const [detailBusy, setDetailBusy] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const tabRefs = useRef<Record<Workspace, HTMLButtonElement | null>>({ materials: null, ask: null, search: null })
+  const positions = useRef<Record<Workspace, number>>({ materials: 0, ask: 0, search: 0 })
+  const opener = useRef<HTMLElement | null>(null)
+  const closeRef = useRef<HTMLButtonElement | null>(null)
+  const requestId = useRef(0)
 
-  /**
-   * run funnels every server call through one place, so a 401 always returns to
-   * the login page and a transport failure is never mistaken for one.
-   */
   const run = useCallback(
     async <T,>(operation: () => Promise<T>): Promise<T | undefined> => {
       try {
@@ -57,42 +68,99 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
     setLoading(false)
   }, [run])
 
+  useEffect(() => { void refresh() }, [refresh])
+
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    if (panel === null) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    closeRef.current?.focus()
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') closePanel()
+      if (event.key !== 'Tab') return
+      const controls = Array.from(document.querySelectorAll<HTMLElement>('.context-sheet button:not(:disabled), .context-sheet input:not(:disabled), .context-sheet select:not(:disabled)'))
+      const first = controls[0]
+      const last = controls[controls.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last?.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first?.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [panel])
+
+  function changeWorkspace(next: Workspace) {
+    if (next === workspace) return
+    positions.current[workspace] = window.scrollY
+    setWorkspace(next)
+    setTimeout(() => {
+      try { window.scrollTo(0, positions.current[next]) } catch { /* jsdom has no scrolling */ }
+    }, 0)
+  }
+
+  function onTabKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, current: Workspace) {
+    const index = WORKSPACES.findIndex((item) => item.id === current)
+    let next = index
+    if (event.key === 'ArrowRight') next = (index + 1) % WORKSPACES.length
+    else if (event.key === 'ArrowLeft') next = (index + WORKSPACES.length - 1) % WORKSPACES.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = WORKSPACES.length - 1
+    else return
+    event.preventDefault()
+    const target = WORKSPACES[next].id
+    changeWorkspace(target)
+    tabRefs.current[target]?.focus()
+  }
 
   async function handleSignOut() {
     try {
       await api.logout()
       onSignOut()
     } catch (failure) {
-      if (failure instanceof api.ApiError && failure.status === 401) {
-        onSignOut()
-      } else {
-        setError(failure instanceof api.ApiError ? failure.message : '网络错误，请重试。')
-      }
+      if (failure instanceof api.ApiError && failure.status === 401) onSignOut()
+      else setError(failure instanceof api.ApiError ? failure.message : '网络错误，请重试。')
     }
   }
 
-  /**
-   * openMaterial loads one material's detail.
-   *
-   * A search hit names its material by id rather than by row, so the list and
-   * the retrieval panel reach the detail the same way; the class check stays on
-   * the server in both cases.
-   */
-  const openMaterial = useCallback(
-    async (materialId: string) => {
-      setDetail(null)
-      setNotice(null)
+  function closePanel() {
+    requestId.current++
+    setPanel(null)
+    setTimeout(() => opener.current?.focus(), 0)
+  }
 
-      const loaded = await run(() => api.getMaterial(materialId))
-      if (loaded !== undefined) {
-        setDetail(loaded)
+  function openIndex(material: Material) {
+    opener.current = document.activeElement as HTMLElement
+    setPanel({ kind: 'index', material })
+  }
+
+  async function openMaterial(materialId: string) {
+    opener.current = document.activeElement as HTMLElement
+    const currentRequest = ++requestId.current
+    setPanel({ kind: 'reader', id: materialId })
+    setDetail(null)
+    setDetailError(null)
+    setDetailBusy(true)
+    try {
+      const loaded = await api.getMaterial(materialId)
+      if (requestId.current === currentRequest) setDetail(loaded)
+    } catch (failure) {
+      if (requestId.current !== currentRequest) return
+      if (failure instanceof api.ApiError && failure.status === 401) {
+        onUnauthorized()
+        return
       }
-    },
-    [run],
-  )
+      setDetailError(failure instanceof api.ApiError ? failure.message : '网络错误，请重试。')
+    } finally {
+      if (requestId.current === currentRequest) setDetailBusy(false)
+    }
+  }
 
   return (
     <main className="app materials-page">
@@ -101,13 +169,10 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
         <div>
           <strong>{user.username}</strong>
           <span className="muted">
-            {' '}
-            · {user.role === 'teacher' ? '教师' : '学生'} · {user.class_name}（班级 ID {user.class_id}）
+            {' '}· {user.role === 'teacher' ? '教师' : '学生'} · {user.class_name}（班级 ID {user.class_id}）
           </span>
         </div>
-        <button type="button" className="secondary" onClick={handleSignOut}>
-          登出
-        </button>
+        <button type="button" className="secondary" onClick={handleSignOut}>登出</button>
       </header>
 
       <div className="page-intro">
@@ -117,37 +182,58 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
       </div>
 
       {error !== null && (
-        <div>
+        <div className="page-message">
           <p className="error" role="alert">{error}</p>
           <button type="button" className="secondary" onClick={() => void refresh()}>重试</button>
         </div>
       )}
-      {notice !== null && <p className="notice" role="status">{notice}</p>}
+      {notice !== null && <p className="notice page-message" role="status">{notice}</p>}
 
-      <RetrievalPanel
-        onUnauthorized={onUnauthorized}
-        onOpenMaterial={(materialId) => void openMaterial(materialId)}
-      />
+      <nav className="workspace-nav" role="tablist" aria-label="材料工作区">
+        {WORKSPACES.map((item) => (
+          <button
+            key={item.id}
+            ref={(node) => { tabRefs.current[item.id] = node }}
+            type="button"
+            id={'workspace-tab-' + item.id}
+            role="tab"
+            aria-controls={'workspace-panel-' + item.id}
+            aria-selected={workspace === item.id}
+            tabIndex={workspace === item.id ? 0 : -1}
+            onClick={() => changeWorkspace(item.id)}
+            onKeyDown={(event) => onTabKeyDown(event, item.id)}
+          >
+            <span>{item.label}</span>
+            <small>{item.description}</small>
+          </button>
+        ))}
+      </nav>
 
-      <div className="dashboard-grid">
+      <section id="workspace-panel-materials" role="tabpanel" aria-labelledby="workspace-tab-materials" hidden={workspace !== 'materials'} className="workspace-panel materials-workspace">
         {user.role === 'teacher' && (
-          <UploadPanel
-            onUploaded={async (title) => {
-              setNotice(`已上传「${title}」。`)
-              setDetail(null)
-              await refresh()
-            }}
-            onUnauthorized={onUnauthorized}
-          />
+          <div className="materials-toolbar">
+            <p className="muted">本班的课程文件与提取文本</p>
+            <button type="button" aria-expanded={uploadOpen} aria-controls="upload-panel" onClick={() => setUploadOpen((open) => !open)}>
+              {uploadOpen ? '收起上传' : '上传材料'}
+            </button>
+          </div>
         )}
-
+        {user.role === 'teacher' && uploadOpen && (
+          <div id="upload-panel">
+            <UploadPanel
+              onUploaded={async (title) => {
+                setNotice('已上传「' + title + '」。')
+                setUploadOpen(false)
+                await refresh()
+              }}
+              onUnauthorized={onUnauthorized}
+            />
+          </div>
+        )}
         <section className="card materials-card">
           <h2>资料列表</h2>
-
           {loading && <p className="muted">加载中…</p>}
-
           {!loading && materials.length === 0 && <p className="muted">本班还没有材料。</p>}
-
           {materials.length > 0 && (
             <ul className="materials">
               {materials.map((material) => (
@@ -155,22 +241,14 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
                   <div className="material-main">
                     <strong>{material.title}</strong>
                     <span className="muted">
-                      {' '}
-                      {material.original_filename} · {material.content_type} ·{' '}
-                      {formatTimestamp(material.created_at)}
+                      {' '}{material.original_filename} · {material.content_type} · {formatTimestamp(material.created_at)}
                     </span>
                   </div>
                   <div className="material-actions">
-                    <button type="button" className="secondary" onClick={() => void openMaterial(material.id)}>
-                      查看
-                    </button>
-                    <button type="button" className="secondary" onClick={() => void run(() => api.downloadMaterial(material.id, material.original_filename))}>
-                      下载
-                    </button>
-                    {/* Index controls are a convenience for the teacher; the
-                        server refuses a student's rebuild on its own. */}
+                    <button type="button" className="secondary" onClick={() => void openMaterial(material.id)}>查看</button>
+                    <button type="button" className="secondary" onClick={() => void run(() => api.downloadMaterial(material.id, material.original_filename))}>下载</button>
                     {user.role === 'teacher' && (
-                      <IndexPanel material={material} onUnauthorized={onUnauthorized} />
+                      <button type="button" className="secondary" onClick={() => openIndex(material)}>索引</button>
                     )}
                   </div>
                 </li>
@@ -178,15 +256,40 @@ export default function MaterialsPage({ user, onSignOut, onUnauthorized }: Props
             </ul>
           )}
         </section>
-      </div>
+      </section>
 
-      {detail !== null && (
-        <section className="card detail-card">
-          <h2>{detail.material.title}</h2>
-          <p className="muted">{detail.material.original_filename} · 提取文本</p>
-          {/* Rendered as text, never as markup: material content is untrusted. */}
-          <pre className="content">{detail.content}</pre>
-        </section>
+      <RetrievalPanel
+        activeWorkspace={workspace}
+        onUnauthorized={onUnauthorized}
+        onOpenMaterial={(materialId) => void openMaterial(materialId)}
+      />
+
+      {panel !== null && (
+        <div className="context-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) closePanel() }}>
+          <section className="context-sheet detail-card" role="dialog" aria-modal="true" aria-labelledby="context-title">
+            <div className="context-header">
+              <div>
+                <p className="eyebrow">{panel.kind === 'reader' ? 'MATERIAL READER' : 'MATERIAL INDEX'}</p>
+                <h2 id="context-title">{panel.kind === 'reader' ? (detail?.material.title ?? '材料正文') : panel.material.title}</h2>
+              </div>
+              <button ref={closeRef} type="button" className="secondary" onClick={closePanel}>关闭</button>
+            </div>
+            {panel.kind === 'reader' ? (
+              <>
+                {detailBusy && <p className="muted" role="status">读取中…</p>}
+                {detailError !== null && <p className="error" role="alert">{detailError}</p>}
+                {detail !== null && (
+                  <>
+                    <p className="muted">{detail.material.original_filename} · 提取文本</p>
+                    <pre className="content">{detail.content}</pre>
+                  </>
+                )}
+              </>
+            ) : (
+              <IndexPanel key={panel.material.id} material={panel.material} onUnauthorized={onUnauthorized} />
+            )}
+          </section>
+        </div>
       )}
     </main>
   )

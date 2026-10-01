@@ -11,6 +11,8 @@ globalThis.document = dom.window.document
 globalThis.HTMLElement = dom.window.HTMLElement
 globalThis.Event = dom.window.Event
 globalThis.MouseEvent = dom.window.MouseEvent
+window.scrollTo = () => {}
+window.HTMLElement.prototype.scrollIntoView = () => {}
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 // The app keeps its access token in localStorage, so each case controls that
@@ -91,7 +93,9 @@ test('a stored token restores the server identity for both roles', async (t) => 
       const container = await mount(sub)
       await until(() => container.querySelector('header.bar') !== null)
       assert.match(container.querySelector('header.bar').textContent, new RegExp(user.username))
-      assert.equal(container.querySelector('form.upload') !== null, upload)
+      assert.equal(container.querySelector('.materials-toolbar button') !== null, upload)
+      assert.equal(container.querySelector('form.upload'), null)
+      assert.equal(container.querySelector('#workspace-tab-materials').getAttribute('aria-selected'), 'true')
       assert.deepEqual(calls, [
         ['/api/me', 'Bearer ' + name + '-stored'],
         ['/api/materials', 'Bearer ' + name + '-stored'],
@@ -234,6 +238,8 @@ test('a search shows traceable hits and opens the cited material', async (t) => 
     throw Error('unexpected request ' + path)
   })
 
+  await act(async () => { container.querySelector('#workspace-tab-search').click() })
+  assert.equal(container.querySelector('#workspace-panel-materials').hidden, true)
   await setInput(container.querySelector('#search-mode'), 'vector')
   await setInput(container.querySelector('#search-query'), '向量检索')
   await submitForm(container.querySelector('form.search'))
@@ -251,9 +257,17 @@ test('a search shows traceable hits and opens the cited material', async (t) => 
   // never reaches the page.
   assert.doesNotMatch(container.textContent, /0\.987654321/)
 
-  await act(async () => { container.querySelector('.hit-actions button').click() })
+  await act(async () => {
+    container.querySelector('.hit-actions button').focus()
+    container.querySelector('.hit-actions button').click()
+  })
   await until(() => container.querySelector('.detail-card') !== null)
   assert.match(container.querySelector('.detail-card').textContent, /完整正文/)
+  assert.equal(container.querySelector('.detail-card').getAttribute('role'), 'dialog')
+  await act(async () => { container.querySelector('.context-header button').click() })
+  await until(() => container.querySelector('.detail-card') === null)
+  await until(() => document.activeElement === container.querySelector('.hit-actions button'))
+  assert.equal(container.querySelector('#search-query').value, '向量检索')
 })
 
 test('an empty result is a notice, and an outage is a retryable error', async (t) => {
@@ -266,6 +280,7 @@ test('an empty result is a notice, and an outage is a retryable error', async (t
     return error(503, 'service_unavailable')
   })
 
+  await act(async () => { container.querySelector('#workspace-tab-search').click() })
   await setInput(container.querySelector('#search-query'), '今天天气如何')
   await submitForm(container.querySelector('form.search'))
   await until(() => container.querySelector('.notice[role="status"]') !== null)
@@ -285,11 +300,12 @@ test('an answer links its markers to the citation list in the same order', async
       answer: '第一点见 [1]，第二点见 [2]，另外 [7] 没有出处。',
       citations: [
         hit({ chunk_id: '1', title: '第一章', chunk_index: 0 }),
-        hit({ chunk_id: '2', title: '第二章', chunk_index: 1 }),
+        hit({ chunk_id: '2', title: '第二章', chunk_index: 1, excerpt: '第二章原文：' + '内容'.repeat(110) + '结尾' }),
       ],
     })
   })
 
+  await act(async () => { container.querySelector('#workspace-tab-ask').click() })
   await setInput(container.querySelector('#ask-question'), '向量检索讲了什么')
   await submitForm(container.querySelector('form.ask'))
   await until(() => container.querySelector('.answer-block') !== null)
@@ -306,6 +322,8 @@ test('an answer links its markers to the citation list in the same order', async
   await act(async () => { container.querySelectorAll('.citation-link')[1].click() })
   assert.equal(container.querySelectorAll('.citation-active').length, 1)
   assert.match(container.querySelector('.citation-active').textContent, /\[2\] 第二章/)
+  assert.match(container.querySelector('.citation-active .excerpt').textContent, /结尾/)
+  assert.equal(container.querySelector('.citation-active .excerpt-toggle').getAttribute('aria-expanded'), 'true')
 
   // The unverifiable marker stays plain text rather than becoming a control.
   assert.equal(container.querySelectorAll('.citation-link').length, 2)
@@ -343,12 +361,13 @@ test('only a teacher is offered the index controls', async (t) => {
     container.remove()
   })
 
-  await until(() => container.querySelector('.index-panel') !== null)
+  await until(() => container.querySelector('.material-actions') !== null)
+  assert.equal(container.querySelector('.index-panel'), null)
 
   // Opening the panel is what reads the status: listing material must not fan
   // out into a request per row.
   assert.equal(indexReads, 0)
-  await act(async () => { container.querySelector('.index-panel button').click() })
+  await act(async () => { container.querySelector('.material-actions button:last-child').click() })
   await until(() => container.querySelector('.index-status') !== null)
 
   assert.equal(indexReads, 1)
@@ -366,6 +385,7 @@ test('an upload carries only the split fields the chosen strategy uses', async (
     throw Error('unexpected request ' + path)
   })
 
+  await act(async () => { container.querySelector('.materials-toolbar button').click() })
   await setInput(container.querySelector('#title'), '讲义')
   await act(async () => {
     const input = container.querySelector('#file')
@@ -403,4 +423,135 @@ test('failed logout leaves the materials page and the stored token usable', asyn
   assert.ok(container.querySelector('header.bar'))
   assert.deepEqual(calls.find(([path]) => path === '/api/logout'), ['/api/logout', 'Bearer still-live'])
   assert.equal(storage.get(TOKEN_KEY), 'still-live')
+})
+
+test('workspaces retain search state and long excerpts expand on demand', async (t) => {
+  const longExcerpt = '段落开头。' + '课程内容'.repeat(55) + '段落结尾。'
+  const container = await signIn(t, student, async (path) => {
+    if (path === '/api/search') return json({ hits: [
+      hit({ chunk_id: 'first', title: '第一条', excerpt: longExcerpt }),
+      hit({ chunk_id: 'second', title: '第二条', excerpt: longExcerpt + '第二条' }),
+    ] })
+    throw Error('unexpected request ' + path)
+  })
+  const tabs = container.querySelectorAll('[role="tab"]')
+  assert.deepEqual([...tabs].map((tab) => tab.textContent.trim().slice(0, 2)), ['材料', '问答', '检索'])
+  assert.equal(container.querySelector('#workspace-panel-materials').hidden, false)
+  assert.equal(container.querySelector('#workspace-panel-search').hidden, true)
+  await act(async () => {
+    container.querySelector('#workspace-tab-materials').focus()
+    container.querySelector('#workspace-tab-materials').dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+    )
+  })
+  assert.equal(container.querySelector('#workspace-tab-ask').getAttribute('aria-selected'), 'true')
+  assert.equal(document.activeElement.id, 'workspace-tab-ask')
+
+  await act(async () => { container.querySelector('#workspace-tab-search').click() })
+  await setInput(container.querySelector('#search-query'), '段落')
+  await submitForm(container.querySelector('form.search'))
+  await until(() => container.querySelector('.hit') !== null)
+  assert.deepEqual([...container.querySelectorAll('.hit-head strong')].map((node) => node.textContent), ['第一条', '第二条'])
+  assert.doesNotMatch(container.querySelector('.hit .excerpt').textContent, /段落结尾/)
+  assert.equal(container.querySelector('.hit .excerpt-toggle').getAttribute('aria-expanded'), 'false')
+  await act(async () => { container.querySelector('.hit .excerpt-toggle').click() })
+  assert.match(container.querySelector('.hit .excerpt').textContent, /段落结尾/)
+  assert.equal(container.querySelector('.hit .excerpt-toggle').getAttribute('aria-expanded'), 'true')
+  assert.equal(container.querySelectorAll('.hit .excerpt-toggle')[1].getAttribute('aria-expanded'), 'false')
+
+  await act(async () => { container.querySelector('#workspace-tab-ask').click() })
+  assert.equal(container.querySelector('#workspace-panel-search').hidden, true)
+  await act(async () => { container.querySelector('#workspace-tab-search').click() })
+  assert.equal(container.querySelector('#search-query').value, '段落')
+  assert.match(container.querySelector('.hit .excerpt').textContent, /段落结尾/)
+})
+
+test('reader keeps untrusted markup as text and Escape returns focus to the source', async (t) => {
+  const userMaterial = {
+    id: '4', title: '安全讲义', original_filename: 'safe.md',
+    content_type: 'text/markdown', created_at: '2026-09-30T00:00:00Z',
+  }
+  storage.clear()
+  storage.set(TOKEN_KEY, 'session-token')
+  globalThis.fetch = async (path) => {
+    if (path === '/api/me') return json(student)
+    if (path === '/api/materials') return json({ materials: [userMaterial] })
+    if (path === '/api/materials/4') {
+      return json({ material: userMaterial, content: '<script>window.bad = true</script>\n原文' })
+    }
+    throw Error('unexpected request ' + path)
+  }
+  const container = await mount(t)
+  await until(() => container.querySelector('.material-actions button') !== null)
+  const trigger = container.querySelector('.material-actions button')
+  await act(async () => { trigger.focus(); trigger.click() })
+  await until(() => container.querySelector('.detail-card .content') !== null)
+  assert.match(container.querySelector('.detail-card .content').textContent, /<script>/)
+  assert.equal(container.querySelector('.detail-card script'), null)
+  assert.equal(window.bad, undefined)
+  await act(async () => {
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  })
+  await until(() => container.querySelector('.detail-card') === null)
+  await until(() => document.activeElement === trigger)
+})
+
+test('teacher upload refreshes the material list in its workspace', async (t) => {
+  let uploaded = false
+  const uploadedMaterial = {
+    id: '9', title: '新讲义', original_filename: 'notes.md',
+    content_type: 'text/markdown', created_at: '2026-09-30T00:00:00Z',
+  }
+  storage.clear()
+  storage.set(TOKEN_KEY, 'session-token')
+  globalThis.fetch = async (path, init) => {
+    if (path === '/api/me') return json(teacher)
+    if (path === '/api/materials' && (init?.method ?? 'GET') === 'GET') {
+      return json({ materials: uploaded ? [uploadedMaterial] : [] })
+    }
+    if (path === '/api/materials' && init?.method === 'POST') {
+      uploaded = true
+      return json({ material: uploadedMaterial }, 201)
+    }
+    throw Error('unexpected request ' + path)
+  }
+  const container = await mount(t)
+  await until(() => container.querySelector('.materials-toolbar button') !== null)
+  await act(async () => { container.querySelector('.materials-toolbar button').click() })
+  await setInput(container.querySelector('#title'), '新讲义')
+  await act(async () => {
+    const input = container.querySelector('#file')
+    Object.defineProperty(input, 'files', {
+      value: [new window.File(['# 内容'], 'notes.md', { type: 'text/markdown' })],
+      configurable: true,
+    })
+    input.dispatchEvent(new window.Event('change', { bubbles: true }))
+  })
+  await submitForm(container.querySelector('form.upload'))
+  await until(() => container.querySelector('.materials strong')?.textContent === '新讲义')
+  assert.equal(container.querySelector('form.upload'), null)
+  assert.equal(container.querySelector('#workspace-panel-materials').hidden, false)
+})
+
+test('search keeps invalid and unavailable requests distinct from empty results', async (t) => {
+  let status = 400
+  const requests = []
+  const container = await signIn(t, student, async (path, init) => {
+    if (path !== '/api/search') throw Error('unexpected request ' + path)
+    requests.push(JSON.parse(init.body))
+    return error(status, status === 400 ? 'bad_query' : 'unauthorized')
+  })
+  await act(async () => { container.querySelector('#workspace-tab-search').click() })
+  await setInput(container.querySelector('#search-mode'), 'keyword')
+  await setInput(container.querySelector('#search-query'), '测试')
+  await submitForm(container.querySelector('form.search'))
+  await until(() => container.querySelector('.retrieval-card .error') !== null)
+  assert.match(container.querySelector('.retrieval-card .error').textContent, /修改后重试/)
+  assert.equal(container.querySelector('.retrieval-card .notice'), null)
+  assert.deepEqual(requests, [{ query: '测试', mode: 'keyword' }])
+
+  status = 401
+  await submitForm(container.querySelector('form.search'))
+  await until(() => container.querySelector('form.login') !== null)
+  assert.equal(storage.has(TOKEN_KEY), false)
 })

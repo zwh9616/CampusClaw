@@ -7,7 +7,7 @@ TBD - created by archiving change add-auth-class-materials. Update Purpose after
 
 ### Requirement: DATA-01 Minimal relational schema
 
-MySQL 8 MUST 创建 classes(id,name,created_at)、users(id,username,password_hash,role,class_id,created_at)、sessions(id,session_id,user_id,created_at,expires_at)、materials(id,class_id,uploaded_by,title,original_filename,stored_filename,content_type,created_at)、knowledge_entries(id,class_id,material_id,content,created_at)。上述字段 MUST NOT NULL。users.username MUST UNIQUE；role MUST 仅为 teacher/student；sessions.session_id MUST 保存客户端随机 Session Token 的 SHA-256 摘要，编码为 64 个小写十六进制字符，并设置唯一约束；数据库 MUST NOT 保存原始 Session Token。users.class_id、materials.class_id、knowledge_entries.class_id/material_id MUST 有必要索引。MUST 使用外键保证班级存在、上传者与材料同班、知识条目与材料同班；每材料 MUST 一条知识记录。MUST NOT 为 Non-goals 建表。
+MySQL 8 MUST 创建 classes(id,name,created_at)、users(id,username,password_hash,role,class_id,created_at)、sessions(id,session_id,user_id,created_at,expires_at)、materials(id,class_id,uploaded_by,title,original_filename,stored_filename,content_type,created_at)、knowledge_entries(id,class_id,material_id,content,created_at)。上述字段 MUST NOT NULL。users.username MUST UNIQUE；role MUST 仅为 teacher/student；sessions.session_id MUST 保存随机访问凭证的 SHA-256 摘要，编码为 64 个小写十六进制字符，并设置唯一约束；数据库 MUST NOT 保存原始 Session Token；sessions MUST NOT 包含刷新凭证字段。users.class_id、materials.class_id、knowledge_entries.class_id/material_id MUST 有必要索引。MUST 使用外键保证班级存在、上传者与材料同班、知识条目与材料同班；每材料 MUST 一条知识记录。MUST NOT 为 Non-goals 建表。
 
 #### Scenario: AC16 Materials requires class
 - **GIVEN** 真实 MySQL 8 的迁移已完成且其他字段合法
@@ -22,7 +22,12 @@ MySQL 8 MUST 创建 classes(id,name,created_at)、users(id,username,password_has
 #### Scenario: DA01 Schema constraints
 - **GIVEN** 全新测试数据库完成迁移
 - **WHEN** 检查表结构、索引并分别插入重复用户名、非法 role、无班级 user、跨班上传者材料、跨班知识条目及重复 material_id 知识条目
-- **THEN** 必需字段及索引存在，所有非法写入均被数据库拒绝；无未来功能业务表
+- **THEN** 必需字段及索引存在，所有非法写入均被数据库拒绝；sessions 无刷新凭证字段，无未来功能业务表
+
+#### Scenario: DA03 Access digest migration
+- **GIVEN** 已有旧版 Cookie Session 行、且 sessions 仍含 refresh_id NOT NULL 列的数据库
+- **WHEN** 执行迁移（清空 sessions 行并删除 refresh_id 列）后用新登录生成会话
+- **THEN** 旧会话全部失效，新行插入成功且只有一个非空唯一的 session_id 摘要，sessions 不再含 refresh_id 列，数据库不含原始访问凭证
 
 ### Requirement: DATA-02 Idempotent secret-safe seed
 
@@ -40,5 +45,5 @@ MySQL 8 MUST 创建 classes(id,name,created_at)、users(id,username,password_has
 
 #### Scenario: AC29 Class B teacher seed login
 - **GIVEN** 全新库已完成 seed，Teacher B 的用户名为 teacher_b，密码来自 SEED_TEACHER_B_PASSWORD
-- **WHEN** 使用对应凭证 POST /api/login，再调用 GET /api/me
-- **THEN** 登录返回 200 并设置 Session Cookie，me 返回 role=teacher、class_name=Class B，class_id 对应 Class B
+- **WHEN** 使用对应凭证 POST /api/login，再以返回的 Bearer token 调用 GET /api/me
+- **THEN** 登录返回 200、访问 token 和 expires_at，响应头不含任何 Set-Cookie；me 返回 role=teacher、class_name=Class B，class_id 对应 Class B
